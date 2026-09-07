@@ -11,12 +11,14 @@ import ch.qos.logback.classic.Level
 import eu.kanade.tachiyomi.source.model.SManga
 import io.github.oshai.kotlinlogging.DelegatingKLogger
 import io.github.oshai.kotlinlogging.KotlinLogging
-import org.jetbrains.exposed.dao.id.IdTable
-import org.jetbrains.exposed.sql.batchInsert
-import org.jetbrains.exposed.sql.deleteAll
-import org.jetbrains.exposed.sql.insertAndGetId
-import org.jetbrains.exposed.sql.transactions.transaction
+import kotlinx.serialization.json.JsonObject
+import org.jetbrains.exposed.v1.core.dao.id.IdTable
+import org.jetbrains.exposed.v1.jdbc.batchInsert
+import org.jetbrains.exposed.v1.jdbc.deleteAll
+import org.jetbrains.exposed.v1.jdbc.insertAndGetId
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.Logger
+import suwayomi.tachidesk.manga.impl.util.lang.EMPTY
 import suwayomi.tachidesk.manga.model.table.ChapterTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 
@@ -55,8 +57,9 @@ fun createChapters(
     mangaId: Int,
     amount: Int,
     read: Boolean,
+    start: Int = 1,
 ) {
-    val list = listOf((0 until amount)).flatten().map { 1 }
+    val list = listOf((0 until amount)).flatten().map { it + start }
     transaction {
         ChapterTable
             .batchInsert(list) {
@@ -65,6 +68,7 @@ fun createChapters(
                 this[ChapterTable.sourceOrder] = it
                 this[ChapterTable.isRead] = read
                 this[ChapterTable.manga] = mangaId
+                this[ChapterTable.memo] = JsonObject.EMPTY
             }
     }
 }

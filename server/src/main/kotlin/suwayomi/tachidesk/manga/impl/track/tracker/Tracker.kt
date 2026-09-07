@@ -20,7 +20,7 @@ abstract class Tracker(
     // Application and remote support for reading dates
     open val supportsReadingDates: Boolean = false
 
-    abstract val supportsTrackDeletion: Boolean
+    open val supportsPrivateTracking: Boolean = false
 
     override fun toString() = "$name ($id) (isLoggedIn= $isLoggedIn, isAuthExpired= ${getIfAuthExpired()})"
 
@@ -38,7 +38,7 @@ abstract class Tracker(
 
     abstract fun getScoreList(): List<String>
 
-    open fun indexToScore(index: Int): Float = index.toFloat()
+    open fun indexToScore(index: Int): Double = index.toDouble()
 
     abstract fun displayScore(track: Track): String
 
@@ -60,7 +60,19 @@ abstract class Tracker(
 
     open suspend fun authCallback(url: String) {}
 
-    abstract suspend fun login(
+    suspend fun login(
+        username: String,
+        password: String,
+    ) {
+        try {
+            loginImpl(username, password)
+        } catch (e: Throwable) {
+            logout()
+            throw e
+        }
+    }
+
+    abstract suspend fun loginImpl(
         username: String,
         password: String,
     )

@@ -11,6 +11,7 @@ plugins {
     alias(libs.plugins.download)
     alias(libs.plugins.kotlin.multiplatform) apply false
     alias(libs.plugins.moko) apply false
+    alias(libs.plugins.jte) apply false
 }
 
 allprojects {
@@ -23,14 +24,17 @@ allprojects {
         google()
         maven("https://github.com/Suwayomi/Suwayomi-Server/raw/android-jar/")
         maven("https://jitpack.io")
+        maven("https://jogamp.org/deployment/maven")
+        maven("https://packages.jetbrains.team/maven/p/ij/intellij-dependencies")
     }
 }
 
 subprojects {
     plugins.withType<JavaPlugin> {
         extensions.configure<JavaPluginExtension> {
-            sourceCompatibility = JavaVersion.VERSION_21
-            targetCompatibility = JavaVersion.VERSION_21
+            val javaVersion = JavaVersion.toVersion(libs.versions.jvmTarget.get())
+            sourceCompatibility = javaVersion
+            targetCompatibility = javaVersion
         }
     }
 
@@ -49,8 +53,8 @@ subprojects {
                 dependsOn("ktlintFormat")
             }
             compilerOptions {
-                jvmTarget = JvmTarget.JVM_21
-                freeCompilerArgs.add("-Xcontext-receivers")
+                jvmTarget = JvmTarget.fromTarget(libs.versions.jvmTarget.get())
+                freeCompilerArgs.add("-Xcontext-parameters")
             }
         }
     }

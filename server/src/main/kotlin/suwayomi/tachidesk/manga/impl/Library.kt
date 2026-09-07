@@ -7,15 +7,19 @@ package suwayomi.tachidesk.manga.impl
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import eu.kanade.tachiyomi.source.local.LocalSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.update
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.neq
+import org.jetbrains.exposed.v1.jdbc.select
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.update
+import org.jetbrains.exposed.v1.jdbc.upsert
 import suwayomi.tachidesk.manga.impl.Manga.getManga
 import suwayomi.tachidesk.manga.model.table.CategoryMangaTable
 import suwayomi.tachidesk.manga.model.table.CategoryTable
@@ -45,7 +49,7 @@ object Library {
 
                 if (existingCategories.isEmpty()) {
                     defaultCategories.forEach { category ->
-                        CategoryMangaTable.insert {
+                        CategoryMangaTable.upsert(CategoryMangaTable.manga, CategoryMangaTable.category) {
                             it[CategoryMangaTable.category] = category[CategoryTable.id].value
                             it[CategoryMangaTable.manga] = mangaId
                         }
@@ -75,11 +79,25 @@ object Library {
         inLibrary: Boolean,
     ) {
         scope.launch {
+            val sourceId =
+                transaction {
+                    MangaTable
+                        .select(MangaTable.sourceReference)
+                        .where { MangaTable.id eq mangaId }
+                        .first()
+                        .get(MangaTable.sourceReference)
+                }
+
+            if (sourceId == LocalSource.ID) {
+                return@launch
+            }
+
             try {
                 if (inLibrary) {
                     ThumbnailDownloadHelper.download(mangaId)
                 } else {
-                    ThumbnailDownloadHelper.delete(mangaId)
+                    ThumbnailDownloadHelper
+                        .delete(mangaId)
                 }
             } catch (e: Exception) {
                 // ignore

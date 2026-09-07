@@ -6,18 +6,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
-import org.jetbrains.exposed.dao.id.EntityID
-import org.jetbrains.exposed.sql.ResultRow
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.batchInsert
-import org.jetbrains.exposed.sql.deleteWhere
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.statements.BatchUpdateStatement
-import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.update
-import suwayomi.tachidesk.manga.impl.track.tracker.DeletableTrackService
+import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.dao.id.EntityID
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.statements.BatchUpdateStatement
+import org.jetbrains.exposed.v1.jdbc.batchInsert
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.statements.toExecutable
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jsoup.Jsoup
+import suwayomi.tachidesk.manga.impl.track.tracker.DeletableTracker
 import suwayomi.tachidesk.manga.impl.track.tracker.TrackerManager
 import suwayomi.tachidesk.manga.impl.track.tracker.model.Track
 import suwayomi.tachidesk.manga.impl.track.tracker.model.toTrack
@@ -31,6 +32,7 @@ import suwayomi.tachidesk.manga.model.table.TrackRecordTable.finishDate
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.lastChapterRead
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.libraryId
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.mangaId
+import suwayomi.tachidesk.manga.model.table.TrackRecordTable.private
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.remoteId
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.remoteUrl
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.score
@@ -68,7 +70,7 @@ object Track {
         if (input.callbackUrl != null) {
             tracker.authCallback(input.callbackUrl)
         } else {
-            tracker.login(input.username ?: "", input.password ?: "")
+            tracker.loginImpl(input.username ?: "", input.password ?: "")
         }
     }
 
@@ -100,7 +102,7 @@ object Track {
             if (record != null) {
                 val track =
                     Track.create(it.id).also { t ->
-                        t.score = record.score.toFloat()
+                        t.score = record.score
                     }
                 record.scoreString = it.displayScore(track)
             }
@@ -124,7 +126,9 @@ object Track {
                 id = it[TrackSearchTable.id].value,
                 trackerId = it[TrackSearchTable.trackerId],
                 remoteId = it[TrackSearchTable.remoteId],
+                libraryId = it[TrackSearchTable.libraryId],
                 title = it[TrackSearchTable.title],
+                lastChapterRead = it[TrackSearchTable.lastChapterRead],
                 totalChapters = it[TrackSearchTable.totalChapters],
                 trackingUrl = it[TrackSearchTable.trackingUrl],
                 coverUrl = it[TrackSearchTable.coverUrl],
@@ -132,6 +136,12 @@ object Track {
                 publishingStatus = it[TrackSearchTable.publishingStatus],
                 publishingType = it[TrackSearchTable.publishingType],
                 startDate = it[TrackSearchTable.startDate],
+                status = it[TrackSearchTable.status],
+                score = it[TrackSearchTable.score],
+                scoreString = null,
+                startedReadingDate = it[TrackSearchTable.startedReadingDate],
+                finishedReadingDate = it[TrackSearchTable.finishedReadingDate],
+                private = it[TrackSearchTable.private],
             )
         }
     }
@@ -139,7 +149,7 @@ object Track {
     private fun ResultRow.toTrackFromSearch(mangaId: Int): Track =
         Track.create(this[TrackSearchTable.trackerId]).also {
             it.manga_id = mangaId
-            it.media_id = this[TrackSearchTable.remoteId]
+            it.remote_id = this[TrackSearchTable.remoteId]
             it.title = this[TrackSearchTable.title]
             it.total_chapters = this[TrackSearchTable.totalChapters]
             it.tracking_url = this[TrackSearchTable.trackingUrl]
@@ -149,6 +159,7 @@ object Track {
         mangaId: Int,
         trackerId: Int,
         remoteId: Long,
+        private: Boolean,
     ) {
         val track =
             transaction {
@@ -166,10 +177,11 @@ object Track {
                                 (TrackRecordTable.remoteId eq remoteId)
                         }.first()
                         .toTrack()
-                        .apply {
-                            manga_id = mangaId
-                        }
+            }.apply {
+                this.manga_id = mangaId
+                this.private = private
             }
+
         val tracker = TrackerManager.getTracker(trackerId)!!
 
         val chapter = queryMaxReadChapter(mangaId)
@@ -210,6 +222,48 @@ object Track {
         }
     }
 
+    fun bindTrackRecord(
+        mangaId: Int,
+        trackRecordId: Int,
+    ): Int {
+        val (trackRecord, existingTrackRecord) =
+            transaction {
+                val trackRecord =
+                    TrackRecordTable
+                        .selectAll()
+                        .where {
+                            (TrackRecordTable.id eq trackRecordId)
+                        }.first()
+                        .toTrackRecordDataClass()
+
+                val existingTrackRecord =
+                    TrackRecordTable
+                        .selectAll()
+                        .where {
+                            (TrackRecordTable.mangaId eq mangaId) and (TrackRecordTable.trackerId eq trackRecord.trackerId)
+                        }.firstOrNull()
+                        ?.toTrackRecordDataClass()
+
+                trackRecord to existingTrackRecord
+            }
+
+        val isAlreadyBoundToManga = trackRecord.mangaId == mangaId
+        if (isAlreadyBoundToManga) {
+            return trackRecordId
+        }
+
+        val hasRecordForTracker = existingTrackRecord != null
+        if (hasRecordForTracker) {
+            val updatedTrack = trackRecord.copy(id = existingTrackRecord.id, mangaId = mangaId).toTrack()
+
+            return updateTrackRecord(updatedTrack)
+        }
+
+        val newTrack = trackRecord.copy(mangaId = mangaId).toTrack()
+
+        return insertTrackRecord(newTrack)
+    }
+
     suspend fun refresh(recordId: Int) {
         val recordDb =
             transaction {
@@ -234,7 +288,7 @@ object Track {
 
         val tracker = TrackerManager.getTracker(recordDb[TrackRecordTable.trackerId])
 
-        if (deleteRemoteTrack == true && tracker is DeletableTrackService) {
+        if (deleteRemoteTrack == true && tracker is DeletableTracker) {
             tracker.delete(recordDb.toTrack())
         }
 
@@ -278,14 +332,16 @@ object Track {
         }
         if (input.scoreString != null) {
             val score = tracker.indexToScore(tracker.getScoreList().indexOf(input.scoreString))
-            // conversion issues between Float <-> Double so convert to string before double
-            recordDb[TrackRecordTable.score] = score.toString().toDouble()
+            recordDb[TrackRecordTable.score] = score
         }
         if (input.startDate != null) {
             recordDb[TrackRecordTable.startDate] = input.startDate
         }
         if (input.finishDate != null) {
             recordDb[TrackRecordTable.finishDate] = input.finishDate
+        }
+        if (input.private != null) {
+            recordDb[TrackRecordTable.private] = input.private
         }
 
         val track = recordDb.toTrack()
@@ -384,7 +440,7 @@ object Track {
         log.debug { "remoteLastReadChapter= $lastChapterRead" }
 
         if (chapterNumber > lastChapterRead) {
-            track.last_chapter_read = chapterNumber.toFloat()
+            track.last_chapter_read = chapterNumber
             tracker.update(track, true)
             upsertTrackRecord(track)
         }
@@ -397,39 +453,44 @@ object Track {
                     .selectAll()
                     .where {
                         (TrackRecordTable.mangaId eq track.manga_id) and
-                            (TrackRecordTable.trackerId eq track.sync_id)
+                            (TrackRecordTable.trackerId eq track.tracker_id)
                     }.singleOrNull()
 
             if (existingRecord != null) {
+                track.id = existingRecord[TrackRecordTable.id].value
                 updateTrackRecord(track)
-                existingRecord[TrackRecordTable.id].value
+                track.id!!
             } else {
                 insertTrackRecord(track)
             }
         }
 
-    fun updateTrackRecord(track: Track) = updateTrackRecords(listOf(track))
+    fun updateTrackRecord(track: Track): Int = updateTrackRecords(listOf(track)).first()
 
-    fun updateTrackRecords(tracks: List<Track>) =
+    fun updateTrackRecords(tracks: List<Track>): List<Int> =
         transaction {
             if (tracks.isNotEmpty()) {
-                BatchUpdateStatement(TrackRecordTable).apply {
-                    tracks.forEach {
-                        addBatch(EntityID(it.id!!, TrackRecordTable))
-                        this[remoteId] = it.media_id
-                        this[libraryId] = it.library_id
-                        this[title] = it.title
-                        this[lastChapterRead] = it.last_chapter_read.toDouble()
-                        this[totalChapters] = it.total_chapters
-                        this[status] = it.status
-                        this[score] = it.score.toDouble()
-                        this[remoteUrl] = it.tracking_url
-                        this[startDate] = it.started_reading_date
-                        this[finishDate] = it.finished_reading_date
-                    }
-                    execute(this@transaction)
-                }
+                BatchUpdateStatement(TrackRecordTable)
+                    .apply {
+                        tracks.forEach {
+                            addBatch(EntityID(it.id!!, TrackRecordTable))
+                            this[remoteId] = it.remote_id
+                            this[libraryId] = it.library_id
+                            this[title] = it.title
+                            this[lastChapterRead] = it.last_chapter_read
+                            this[totalChapters] = it.total_chapters
+                            this[status] = it.status
+                            this[score] = it.score
+                            this[remoteUrl] = it.tracking_url
+                            this[startDate] = it.started_reading_date
+                            this[finishDate] = it.finished_reading_date
+                            this[private] = it.private
+                        }
+                    }.toExecutable()
+                    .execute(this@transaction)
             }
+
+            tracks.map { it.id!! }
         }
 
     fun insertTrackRecord(track: Track): Int = insertTrackRecords(listOf(track)).first()
@@ -439,17 +500,18 @@ object Track {
             TrackRecordTable
                 .batchInsert(tracks) {
                     this[mangaId] = it.manga_id
-                    this[trackerId] = it.sync_id
-                    this[remoteId] = it.media_id
+                    this[trackerId] = it.tracker_id
+                    this[remoteId] = it.remote_id
                     this[libraryId] = it.library_id
                     this[title] = it.title
-                    this[lastChapterRead] = it.last_chapter_read.toDouble()
+                    this[lastChapterRead] = it.last_chapter_read
                     this[totalChapters] = it.total_chapters
                     this[status] = it.status
-                    this[score] = it.score.toDouble()
+                    this[score] = it.score
                     this[remoteUrl] = it.tracking_url
                     this[startDate] = it.started_reading_date
                     this[finishDate] = it.finished_reading_date
+                    this[private] = it.private
                 }.map { it[TrackRecordTable.id].value }
         }
 
@@ -481,5 +543,8 @@ object Track {
         val startDate: Long? = null,
         val finishDate: Long? = null,
         val unbind: Boolean? = null,
+        val private: Boolean? = null,
     )
+
+    fun String.htmlDecode(): String = Jsoup.parse(this).wholeText()
 }

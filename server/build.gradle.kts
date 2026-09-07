@@ -25,6 +25,11 @@ plugins {
             .get()
             .pluginId,
     )
+    id(
+        libs.plugins.jte
+            .get()
+            .pluginId,
+    )
 }
 
 dependencies {
@@ -43,12 +48,13 @@ dependencies {
     // GraphQL
     implementation(libs.graphql.kotlin.server)
     implementation(libs.graphql.kotlin.scheme)
-    implementation(libs.graphql.java.core)
     implementation(libs.graphql.java.scalars)
 
     // Exposed ORM
     implementation(libs.bundles.exposed)
+    implementation(libs.postgres)
     implementation(libs.h2)
+    implementation(libs.hikaricp)
 
     // Exposed Migrations
     implementation(libs.exposed.migrations)
@@ -88,6 +94,9 @@ dependencies {
     // i18n
     implementation(projects.server.i18n)
 
+    // Settings module
+    implementation(projects.server.serverConfig)
+
     // uncomment to test extensions directly
 //    implementation(fileTree("lib/"))
     implementation(kotlin("script-runtime"))
@@ -97,6 +106,14 @@ dependencies {
     implementation(libs.cron4j)
 
     implementation(libs.cronUtils)
+
+    implementation(libs.jwt)
+
+    compileOnly(libs.kte)
+}
+
+jte {
+    generate()
 }
 
 application {
@@ -111,6 +128,15 @@ sourceSets {
     main {
         resources {
             srcDir("src/main/resources")
+            srcDir("build/generated/src/main/resources")
+        }
+        kotlin {
+            srcDir("build/generated/src/main/kotlin")
+        }
+    }
+    test {
+        resources {
+            srcDir("build/generated/src/test/resources")
         }
     }
 }
@@ -133,6 +159,8 @@ buildConfig {
 
     buildConfigField("String", "GITHUB", quoteWrap("https://github.com/Suwayomi/Suwayomi-Server"))
     buildConfigField("String", "DISCORD", quoteWrap("https://discord.gg/DDZdqZWaHA"))
+    buildConfigField("String", "JCEF_VERSION", quoteWrap(libs.versions.jcef.get()))
+    buildConfigField("String", "JCEF_JBR_RELEASE", quoteWrap(webviewJbrRelease))
 }
 
 tasks {
@@ -145,17 +173,35 @@ tasks {
                 "Implementation-Vendor" to "The Suwayomi Project",
                 "Specification-Version" to getTachideskVersion(),
                 "Implementation-Version" to getTachideskRevision(),
+                "Multi-Release" to true, // needed for polyglot
+                "X-JBR-Release" to webviewJbrRelease,
             )
         }
         archiveBaseName.set(rootProject.name)
         archiveVersion.set(getTachideskVersion())
         archiveClassifier.set("")
         destinationDirectory.set(File("$rootDir/server/build"))
-        mergeServiceFiles()
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
+        mergeServiceFiles("META-INF/services")
+        dependencies {
+            // The deprecated GraalVM js-community POM chain declares `<type>pom</type>`
+            // dependencies, which puts literal .pom artifacts on the resolved classpath.
+            // Shadow 9 expands every classpath file with zipTree() and fails with
+            // "Cannot expand ZIP" on them (GradleUp/shadow#1716). Excluding the
+            // POM-only metapackages drops just those .pom files; the actual jars
+            // (js-language, truffle-runtime) are still shadowed and their
+            // META-INF/services files are still merged by mergeServiceFiles.
+            exclude(dependency("org.graalvm.js:js-community:.*"))
+            exclude(dependency("org.graalvm.js:js:.*"))
+        }
     }
 
     test {
-        useJUnitPlatform()
+        useJUnitPlatform {
+            if (!project.hasProperty("masstest")) {
+                exclude("**/masstest/*")
+            }
+        }
         testLogging {
             showStandardStreams = true
             events("passed", "skipped", "failed")
@@ -212,5 +258,21 @@ tasks {
                     "-Dsuwayomi.tachidesk.config.server.electronPath=/usr/bin/electron",
                 )
         }
+    }
+
+    runKtlintCheckOverMainSourceSet {
+        mustRunAfter(generateJte)
+    }
+
+    compileKotlin {
+        dependsOn(":server:server-config-generate:generateSettings")
+    }
+
+    processResources {
+        dependsOn(":server:server-config-generate:generateSettings")
+    }
+
+    processTestResources {
+        dependsOn(":server:server-config-generate:generateSettings")
     }
 }

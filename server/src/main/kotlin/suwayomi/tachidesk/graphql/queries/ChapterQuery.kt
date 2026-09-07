@@ -10,17 +10,18 @@ package suwayomi.tachidesk.graphql.queries
 import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import com.expediagroup.graphql.server.extensions.getValueFromDataLoader
 import graphql.schema.DataFetchingEnvironment
-import org.jetbrains.exposed.sql.Column
-import org.jetbrains.exposed.sql.Op
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
-import org.jetbrains.exposed.sql.andWhere
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.Column
+import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.greater
+import org.jetbrains.exposed.v1.core.less
+import org.jetbrains.exposed.v1.jdbc.andWhere
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.graphql.queries.filter.BooleanFilter
+import suwayomi.tachidesk.graphql.queries.filter.DoubleFilter
 import suwayomi.tachidesk.graphql.queries.filter.Filter
-import suwayomi.tachidesk.graphql.queries.filter.FloatFilter
 import suwayomi.tachidesk.graphql.queries.filter.HasGetOp
 import suwayomi.tachidesk.graphql.queries.filter.IntFilter
 import suwayomi.tachidesk.graphql.queries.filter.LongFilter
@@ -36,9 +37,9 @@ import suwayomi.tachidesk.graphql.server.primitives.OrderBy
 import suwayomi.tachidesk.graphql.server.primitives.PageInfo
 import suwayomi.tachidesk.graphql.server.primitives.QueryResults
 import suwayomi.tachidesk.graphql.server.primitives.applyBeforeAfter
+import suwayomi.tachidesk.graphql.server.primitives.applySortAndGetPaginationInfo
 import suwayomi.tachidesk.graphql.server.primitives.greaterNotUnique
 import suwayomi.tachidesk.graphql.server.primitives.lessNotUnique
-import suwayomi.tachidesk.graphql.server.primitives.maybeSwap
 import suwayomi.tachidesk.graphql.types.ChapterNodeList
 import suwayomi.tachidesk.graphql.types.ChapterType
 import suwayomi.tachidesk.manga.model.table.ChapterTable
@@ -51,6 +52,7 @@ import java.util.concurrent.CompletableFuture
  * - Get page list?
  */
 class ChapterQuery {
+    @RequireAuth
     fun chapter(
         dataFetchingEnvironment: DataFetchingEnvironment,
         id: Int,
@@ -156,7 +158,7 @@ class ChapterQuery {
         val url: StringFilter? = null,
         val name: StringFilter? = null,
         val uploadDate: LongFilter? = null,
-        val chapterNumber: FloatFilter? = null,
+        val chapterNumber: DoubleFilter? = null,
         val scanlator: StringFilter? = null,
         val mangaId: IntFilter? = null,
         val isRead: BooleanFilter? = null,
@@ -179,7 +181,7 @@ class ChapterQuery {
                 andFilterWithCompareString(ChapterTable.url, url),
                 andFilterWithCompareString(ChapterTable.name, name),
                 andFilterWithCompare(ChapterTable.date_upload, uploadDate),
-                andFilterWithCompare(ChapterTable.chapter_number, chapterNumber),
+                andFilterWithCompare(ChapterTable.chapter_number, chapterNumber?.toFloatFilter()),
                 andFilterWithCompareString(ChapterTable.scanlator, scanlator),
                 andFilterWithCompareEntity(ChapterTable.manga, mangaId),
                 andFilterWithCompare(ChapterTable.isRead, isRead),
@@ -196,6 +198,7 @@ class ChapterQuery {
         fun getLibraryOp() = andFilterWithCompare(MangaTable.inLibrary, inLibrary)
     }
 
+    @RequireAuth
     fun chapters(
         condition: ChapterCondition? = null,
         filter: ChapterFilter? = null,
@@ -230,21 +233,11 @@ class ChapterQuery {
 
                 res.applyOps(condition, filter)
 
-                if (order != null || orderBy != null || (last != null || before != null)) {
-                    val baseSort = listOf(ChapterOrder(ChapterOrderBy.ID, SortOrder.ASC))
-                    val deprecatedSort = listOfNotNull(orderBy?.let { ChapterOrder(orderBy, orderByType) })
-                    val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
-                    actualSort.forEach { (orderBy, orderByType) ->
-                        val orderByColumn = orderBy.column
-                        val orderType = orderByType.maybeSwap(last ?: before)
+                val baseSort = listOf(ChapterOrder(ChapterOrderBy.ID, SortOrder.ASC))
+                val deprecatedSort = listOfNotNull(orderBy?.let { ChapterOrder(orderBy, orderByType) })
+                val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
 
-                        res.orderBy(orderByColumn to orderType)
-                    }
-                }
-
-                val total = res.count()
-                val firstResult = res.firstOrNull()?.get(ChapterTable.id)?.value
-                val lastResult = res.lastOrNull()?.get(ChapterTable.id)?.value
+                val (total, firstResult, lastResult) = res.applySortAndGetPaginationInfo(actualSort, before, last, ChapterTable.id)
 
                 res.applyBeforeAfter(
                     before = before,

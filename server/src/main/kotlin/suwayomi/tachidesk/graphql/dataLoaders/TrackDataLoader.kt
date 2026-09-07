@@ -11,10 +11,10 @@ import com.expediagroup.graphql.dataloader.KotlinDataLoader
 import graphql.GraphQLContext
 import org.dataloader.DataLoader
 import org.dataloader.DataLoaderFactory
-import org.jetbrains.exposed.sql.Slf4jSqlDebugLogger
-import org.jetbrains.exposed.sql.addLogger
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.Slf4jSqlDebugLogger
+import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import suwayomi.tachidesk.graphql.types.TrackRecordNodeList
 import suwayomi.tachidesk.graphql.types.TrackRecordNodeList.Companion.toNodeList
 import suwayomi.tachidesk.graphql.types.TrackRecordType
@@ -22,7 +22,9 @@ import suwayomi.tachidesk.graphql.types.TrackStatusType
 import suwayomi.tachidesk.graphql.types.TrackerType
 import suwayomi.tachidesk.manga.impl.track.tracker.TrackerManager
 import suwayomi.tachidesk.manga.impl.track.tracker.model.toTrack
+import suwayomi.tachidesk.manga.impl.track.tracker.model.toTrackSearch
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable
+import suwayomi.tachidesk.manga.model.table.TrackSearchTable
 import suwayomi.tachidesk.server.JavalinSetup.future
 
 class TrackerDataLoader : KotlinDataLoader<Int, TrackerType> {
@@ -116,7 +118,30 @@ class DisplayScoreForTrackRecordDataLoader : KotlinDataLoader<Int, String> {
                             .toList()
                             .map { it.toTrack() }
                             .associateBy { it.id!! }
-                            .mapValues { TrackerManager.getTracker(it.value.sync_id)?.displayScore(it.value) }
+                            .mapValues { TrackerManager.getTracker(it.value.tracker_id)?.displayScore(it.value) }
+
+                    ids.map { trackRecords[it] }
+                }
+            }
+        }
+}
+
+class DisplayScoreForTrackSearchDataLoader : KotlinDataLoader<Int, String> {
+    override val dataLoaderName = "DisplayScoreForTrackSearchDataLoader"
+
+    override fun getDataLoader(graphQLContext: GraphQLContext): DataLoader<Int, String> =
+        DataLoaderFactory.newDataLoader<Int, String> { ids ->
+            future {
+                transaction {
+                    addLogger(Slf4jSqlDebugLogger)
+                    val trackRecords =
+                        TrackSearchTable
+                            .selectAll()
+                            .where { TrackSearchTable.id inList ids }
+                            .toList()
+                            .map { it.toTrackSearch() }
+                            .associateBy { it.id!! }
+                            .mapValues { TrackerManager.getTracker(it.value.tracker_id)?.displayScore(it.value) }
 
                     ids.map { trackRecords[it] }
                 }
