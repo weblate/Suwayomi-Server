@@ -9,7 +9,7 @@ package suwayomi.tachidesk.graphql.types
 
 import com.expediagroup.graphql.server.extensions.getValueFromDataLoader
 import graphql.schema.DataFetchingEnvironment
-import org.jetbrains.exposed.sql.ResultRow
+import org.jetbrains.exposed.v1.core.ResultRow
 import suwayomi.tachidesk.graphql.server.primitives.Cursor
 import suwayomi.tachidesk.graphql.server.primitives.Edge
 import suwayomi.tachidesk.graphql.server.primitives.Node
@@ -27,6 +27,7 @@ class CategoryType(
     val default: Boolean,
     val includeInUpdate: IncludeOrExclude,
     val includeInDownload: IncludeOrExclude,
+    val isDefaultCategory: Boolean = id == 0,
 ) : Node {
     constructor(row: ResultRow) : this(
         row[CategoryTable.id].value,

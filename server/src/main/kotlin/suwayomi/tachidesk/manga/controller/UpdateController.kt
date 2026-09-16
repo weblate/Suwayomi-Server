@@ -10,7 +10,10 @@ import suwayomi.tachidesk.manga.impl.update.UpdateStatus
 import suwayomi.tachidesk.manga.impl.update.UpdaterSocket
 import suwayomi.tachidesk.manga.model.dataclass.MangaChapterDataClass
 import suwayomi.tachidesk.manga.model.dataclass.PaginatedList
+import suwayomi.tachidesk.server.JavalinSetup.Attribute
 import suwayomi.tachidesk.server.JavalinSetup.future
+import suwayomi.tachidesk.server.JavalinSetup.getAttribute
+import suwayomi.tachidesk.server.user.requireUser
 import suwayomi.tachidesk.server.util.formParam
 import suwayomi.tachidesk.server.util.handler
 import suwayomi.tachidesk.server.util.pathParam
@@ -39,6 +42,7 @@ object UpdateController {
                 }
             },
             behaviorOf = { ctx, pageNum ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 ctx.future {
                     future {
                         Chapter.getRecentChapters(pageNum)
@@ -51,7 +55,7 @@ object UpdateController {
         )
 
     /**
-     * Class made for handling return type in the documentation for [recentChapters],
+     * Class made for handling return type in the documentation for [UpdateController.recentChapters],
      * since OpenApi cannot handle runtime generics.
      */
     private class PagedMangaChapterListDataClass : PaginatedList<MangaChapterDataClass>(emptyList(), false)
@@ -66,6 +70,7 @@ object UpdateController {
                 }
             },
             behaviorOf = { ctx, categoryId ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 val updater = Injekt.get<IUpdater>()
                 if (categoryId == null) {
                     logger.info { "Adding Library to Update Queue" }
@@ -96,6 +101,7 @@ object UpdateController {
 
     fun categoryUpdateWS(ws: WsConfig) {
         ws.onConnect { ctx ->
+            ctx.getAttribute(Attribute.TachideskUser).requireUser()
             UpdaterSocket.addClient(ctx)
         }
         ws.onMessage { ctx ->
@@ -115,6 +121,7 @@ object UpdateController {
                 }
             },
             behaviorOf = { ctx ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 val updater = Injekt.get<IUpdater>()
                 ctx.json(updater.statusDeprecated.value)
             },
@@ -132,6 +139,7 @@ object UpdateController {
                 }
             },
             behaviorOf = { ctx ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 val updater = Injekt.get<IUpdater>()
                 logger.info { "Resetting Updater" }
                 ctx.future {

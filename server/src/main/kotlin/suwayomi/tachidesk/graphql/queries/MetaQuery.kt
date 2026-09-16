@@ -10,14 +10,15 @@ package suwayomi.tachidesk.graphql.queries
 import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import com.expediagroup.graphql.server.extensions.getValueFromDataLoader
 import graphql.schema.DataFetchingEnvironment
-import org.jetbrains.exposed.sql.Column
-import org.jetbrains.exposed.sql.Op
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.Column
+import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.greater
+import org.jetbrains.exposed.v1.core.less
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import suwayomi.tachidesk.global.model.table.GlobalMetaTable
+import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.graphql.queries.filter.Filter
 import suwayomi.tachidesk.graphql.queries.filter.HasGetOp
 import suwayomi.tachidesk.graphql.queries.filter.OpAnd
@@ -30,14 +31,15 @@ import suwayomi.tachidesk.graphql.server.primitives.OrderBy
 import suwayomi.tachidesk.graphql.server.primitives.PageInfo
 import suwayomi.tachidesk.graphql.server.primitives.QueryResults
 import suwayomi.tachidesk.graphql.server.primitives.applyBeforeAfter
+import suwayomi.tachidesk.graphql.server.primitives.applySortAndGetPaginationInfo
 import suwayomi.tachidesk.graphql.server.primitives.greaterNotUnique
 import suwayomi.tachidesk.graphql.server.primitives.lessNotUnique
-import suwayomi.tachidesk.graphql.server.primitives.maybeSwap
 import suwayomi.tachidesk.graphql.types.GlobalMetaNodeList
 import suwayomi.tachidesk.graphql.types.GlobalMetaType
 import java.util.concurrent.CompletableFuture
 
 class MetaQuery {
+    @RequireAuth
     fun meta(
         dataFetchingEnvironment: DataFetchingEnvironment,
         key: String,
@@ -104,6 +106,7 @@ class MetaQuery {
             )
     }
 
+    @RequireAuth
     fun metas(
         condition: MetaCondition? = null,
         filter: MetaFilter? = null,
@@ -130,21 +133,16 @@ class MetaQuery {
 
                 res.applyOps(condition, filter)
 
-                if (order != null || orderBy != null || (last != null || before != null)) {
-                    val baseSort = listOf(MetaOrder(MetaOrderBy.KEY, SortOrder.ASC))
-                    val deprecatedSort = listOfNotNull(orderBy?.let { MetaOrder(orderBy, orderByType) })
-                    val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
-                    actualSort.forEach { (orderBy, orderByType) ->
-                        val orderByColumn = orderBy.column
-                        val orderType = orderByType.maybeSwap(last ?: before)
+                val baseSort = listOf(MetaOrder(MetaOrderBy.KEY, SortOrder.ASC))
+                val deprecatedSort = listOfNotNull(orderBy?.let { MetaOrder(orderBy, orderByType) })
+                val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
 
-                        res.orderBy(orderByColumn to orderType)
-                    }
-                }
-
-                val total = res.count()
-                val firstResult = res.firstOrNull()?.get(GlobalMetaTable.key)
-                val lastResult = res.lastOrNull()?.get(GlobalMetaTable.key)
+                val (total, firstResult, lastResult) =
+                    res.applySortAndGetPaginationInfo(
+                        actualSort,
+                        before,
+                        last,
+                    ) { it?.get(GlobalMetaTable.key) }
 
                 res.applyBeforeAfter(
                     before = before,

@@ -11,10 +11,10 @@ import com.expediagroup.graphql.dataloader.KotlinDataLoader
 import graphql.GraphQLContext
 import org.dataloader.DataLoader
 import org.dataloader.DataLoaderFactory
-import org.jetbrains.exposed.sql.Slf4jSqlDebugLogger
-import org.jetbrains.exposed.sql.addLogger
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.Slf4jSqlDebugLogger
+import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import suwayomi.tachidesk.graphql.types.CategoryNodeList
 import suwayomi.tachidesk.graphql.types.CategoryNodeList.Companion.toNodeList
 import suwayomi.tachidesk.graphql.types.CategoryType
@@ -37,24 +37,6 @@ class CategoryDataLoader : KotlinDataLoader<Int, CategoryType> {
                             .map { CategoryType(it) }
                             .associateBy { it.id }
                     ids.map { categories[it] }
-                }
-            }
-        }
-}
-
-class CategoryForIdsDataLoader : KotlinDataLoader<List<Int>, CategoryNodeList> {
-    override val dataLoaderName = "CategoryForIdsDataLoader"
-
-    override fun getDataLoader(graphQLContext: GraphQLContext): DataLoader<List<Int>, CategoryNodeList> =
-        DataLoaderFactory.newDataLoader { categoryIds ->
-            future {
-                transaction {
-                    addLogger(Slf4jSqlDebugLogger)
-                    val ids = categoryIds.flatten().distinct()
-                    val categories = CategoryTable.selectAll().where { CategoryTable.id inList ids }.map { CategoryType(it) }
-                    categoryIds.map { categoryIds ->
-                        categories.filter { it.id in categoryIds }.toNodeList()
-                    }
                 }
             }
         }

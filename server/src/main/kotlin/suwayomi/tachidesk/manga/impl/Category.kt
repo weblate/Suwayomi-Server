@@ -7,16 +7,22 @@ package suwayomi.tachidesk.manga.impl
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.andWhere
-import org.jetbrains.exposed.sql.batchInsert
-import org.jetbrains.exposed.sql.deleteWhere
-import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.update
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.dao.id.EntityID
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.core.isNull
+import org.jetbrains.exposed.v1.core.neq
+import org.jetbrains.exposed.v1.core.statements.BatchUpdateStatement
+import org.jetbrains.exposed.v1.jdbc.andWhere
+import org.jetbrains.exposed.v1.jdbc.batchInsert
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.statements.toExecutable
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.update
+import suwayomi.tachidesk.global.impl.sync.SyncYomiSyncService
 import suwayomi.tachidesk.manga.model.dataclass.CategoryDataClass
 import suwayomi.tachidesk.manga.model.table.CategoryMangaTable
 import suwayomi.tachidesk.manga.model.table.CategoryMetaTable
@@ -108,11 +114,48 @@ object Category {
         }
     }
 
+    /** Move the category to 1-based [position] among the non-default categories, ignoring raw order values. */
+    fun moveCategoryToPosition(
+        categoryId: Int,
+        position: Int,
+    ) {
+        require(position > 0) { "'position' must be > 0" }
+        if (categoryId == DEFAULT_CATEGORY_ID) return
+        transaction {
+            val categories =
+                CategoryTable
+                    .selectAll()
+                    .where { CategoryTable.id neq DEFAULT_CATEGORY_ID }
+                    .orderBy(CategoryTable.order to SortOrder.ASC, CategoryTable.id to SortOrder.ASC)
+                    .toMutableList()
+            val from = categories.indexOfFirst { it[CategoryTable.id].value == categoryId }
+            if (from == -1) return@transaction
+            categories.add((position - 1).coerceAtMost(categories.size - 1), categories.removeAt(from))
+            categories.forEachIndexed { index, cat ->
+                if (cat[CategoryTable.order] != index + 1) {
+                    CategoryTable.update({ CategoryTable.id eq cat[CategoryTable.id].value }) {
+                        it[CategoryTable.order] = index + 1
+                    }
+                }
+            }
+            normalizeCategories()
+        }
+    }
+
     fun removeCategory(categoryId: Int) {
         if (categoryId == DEFAULT_CATEGORY_ID) return
         transaction {
+            val uid =
+                CategoryTable
+                    .selectAll()
+                    .where { CategoryTable.id eq categoryId }
+                    .firstOrNull()
+                    ?.get(CategoryTable.uid)
             CategoryTable.deleteWhere { CategoryTable.id eq categoryId }
             normalizeCategories()
+            if (uid != null) {
+                SyncYomiSyncService.rememberDeletedCategory(uid)
+            }
         }
     }
 
@@ -193,26 +236,73 @@ object Category {
                 .associate { it[CategoryMetaTable.key] to it[CategoryMetaTable.value] }
         }
 
+    fun getCategoriesMetaMaps(ids: List<Int>): Map<Int, Map<String, String>> =
+        transaction {
+            CategoryMetaTable
+                .selectAll()
+                .where { CategoryMetaTable.ref inList ids }
+                .groupBy { it[CategoryMetaTable.ref].value }
+                .mapValues { it.value.associate { it[CategoryMetaTable.key] to it[CategoryMetaTable.value] } }
+                .withDefault { emptyMap() }
+        }
+
     fun modifyMeta(
         categoryId: Int,
         key: String,
         value: String,
     ) {
-        transaction {
-            val meta =
-                transaction {
-                    CategoryMetaTable.selectAll().where { (CategoryMetaTable.ref eq categoryId) and (CategoryMetaTable.key eq key) }
-                }.firstOrNull()
+        modifyCategoriesMetas(mapOf(categoryId to mapOf(key to value)))
+    }
 
-            if (meta == null) {
-                CategoryMetaTable.insert {
-                    it[CategoryMetaTable.key] = key
-                    it[CategoryMetaTable.value] = value
-                    it[CategoryMetaTable.ref] = categoryId
+    fun modifyCategoriesMetas(metaByCategoryId: Map<Int, Map<String, String>>) {
+        transaction {
+            val categoryIds = metaByCategoryId.keys
+            val metaKeys = metaByCategoryId.flatMap { it.value.keys }
+
+            val dbMetaByCategoryId =
+                CategoryMetaTable
+                    .selectAll()
+                    .where { (CategoryMetaTable.ref inList categoryIds) and (CategoryMetaTable.key inList metaKeys) }
+                    .groupBy { it[CategoryMetaTable.ref].value }
+
+            val existingMetaByMetaId =
+                categoryIds.flatMap { categoryId ->
+                    val dbMetaByKey = dbMetaByCategoryId[categoryId].orEmpty().associateBy { it[CategoryMetaTable.key] }
+                    val existingMetas = metaByCategoryId[categoryId].orEmpty().filter { (key) -> key in dbMetaByKey.keys }
+
+                    existingMetas.map { entry ->
+                        val metaId = dbMetaByKey[entry.key]!![CategoryMetaTable.id].value
+
+                        metaId to entry
+                    }
                 }
-            } else {
-                CategoryMetaTable.update({ (CategoryMetaTable.ref eq categoryId) and (CategoryMetaTable.key eq key) }) {
-                    it[CategoryMetaTable.value] = value
+
+            val newMetaByCategoryId =
+                categoryIds.flatMap { categoryID ->
+                    val dbMetaByKey = dbMetaByCategoryId[categoryID].orEmpty().associateBy { it[CategoryMetaTable.key] }
+
+                    metaByCategoryId[categoryID]
+                        .orEmpty()
+                        .filter { entry -> entry.key !in dbMetaByKey.keys }
+                        .map { entry -> categoryID to entry }
+                }
+
+            if (existingMetaByMetaId.isNotEmpty()) {
+                BatchUpdateStatement(CategoryMetaTable)
+                    .apply {
+                        existingMetaByMetaId.forEach { (metaId, entry) ->
+                            addBatch(EntityID(metaId, CategoryMetaTable))
+                            this[CategoryMetaTable.value] = entry.value
+                        }
+                    }.toExecutable()
+                    .execute(this@transaction)
+            }
+
+            if (newMetaByCategoryId.isNotEmpty()) {
+                CategoryMetaTable.batchInsert(newMetaByCategoryId) { (categoryId, entry) ->
+                    this[CategoryMetaTable.ref] = EntityID(categoryId, CategoryTable)
+                    this[CategoryMetaTable.key] = entry.key
+                    this[CategoryMetaTable.value] = entry.value
                 }
             }
         }

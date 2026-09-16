@@ -9,25 +9,24 @@ package eu.kanade.tachiyomi.network
 
 import android.content.Context
 import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
-import eu.kanade.tachiyomi.network.interceptor.IgnoreGzipInterceptor
 import eu.kanade.tachiyomi.network.interceptor.UncaughtExceptionInterceptor
 import eu.kanade.tachiyomi.network.interceptor.UserAgentInterceptor
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import okhttp3.Cache
 import okhttp3.OkHttpClient
-import okhttp3.brotli.BrotliInterceptor
 import okhttp3.logging.HttpLoggingInterceptor
-import suwayomi.tachidesk.manga.impl.util.source.GetCatalogueSource
-import java.io.File
+import suwayomi.tachidesk.manga.impl.util.source.GetSource
 import java.net.CookieHandler
 import java.net.CookieManager
 import java.net.CookiePolicy
+import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 
 class NetworkHelper(
@@ -54,6 +53,7 @@ class NetworkHelper(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
+    val userAgentFlow = userAgent.asStateFlow()
 
     fun defaultUserAgentProvider(): String = userAgent.value
 
@@ -62,7 +62,7 @@ class NetworkHelper(
         userAgent
             .drop(1)
             .onEach {
-                GetCatalogueSource.unregisterAllCatalogueSources() // need to reset the headers
+                GetSource.unregisterAllSources() // need to reset the headers
             }.launchIn(GlobalScope)
     }
 
@@ -77,13 +77,11 @@ class NetworkHelper(
                     .callTimeout(2, TimeUnit.MINUTES)
                     .cache(
                         Cache(
-                            directory = File.createTempFile("tachidesk_network_cache", null),
+                            directory = Files.createTempDirectory("tachidesk_network_cache").toFile(),
                             maxSize = 5L * 1024 * 1024, // 5 MiB
                         ),
                     ).addInterceptor(UncaughtExceptionInterceptor())
                     .addInterceptor(UserAgentInterceptor(::defaultUserAgentProvider))
-                    .addNetworkInterceptor(IgnoreGzipInterceptor())
-                    .addNetworkInterceptor(BrotliInterceptor)
 
             // if (preferences.verboseLogging().get()) {
             val httpLoggingInterceptor =
@@ -126,5 +124,7 @@ class NetworkHelper(
 //    val client by lazy { baseClientBuilder.cache(Cache(cacheDir, cacheSize)).build() }
     val client by lazy { baseClientBuilder.build() }
 
+    @Deprecated("The regular client handles Cloudflare by default")
+    @Suppress("UNUSED")
     val cloudflareClient by lazy { client }
 }

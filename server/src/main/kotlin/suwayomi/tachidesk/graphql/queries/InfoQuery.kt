@@ -2,14 +2,16 @@ package suwayomi.tachidesk.graphql.queries
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import suwayomi.tachidesk.global.impl.AppUpdate
+import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.graphql.types.AboutWebUI
-import suwayomi.tachidesk.graphql.types.WebUIChannel
+import suwayomi.tachidesk.graphql.types.PlatformInfo
 import suwayomi.tachidesk.graphql.types.WebUIFlavor
 import suwayomi.tachidesk.graphql.types.WebUIUpdateCheck
 import suwayomi.tachidesk.graphql.types.WebUIUpdateStatus
 import suwayomi.tachidesk.server.JavalinSetup.future
 import suwayomi.tachidesk.server.generated.BuildConfig
 import suwayomi.tachidesk.server.serverConfig
+import suwayomi.tachidesk.server.util.Platform
 import suwayomi.tachidesk.server.util.WebInterfaceManager
 import java.util.concurrent.CompletableFuture
 
@@ -23,6 +25,7 @@ class InfoQuery {
         val buildTime: Long,
         val github: String,
         val discord: String,
+        val platformInfo: PlatformInfo,
     )
 
     fun aboutServer(): AboutServerPayload =
@@ -34,6 +37,7 @@ class InfoQuery {
             BuildConfig.BUILD_TIME,
             BuildConfig.GITHUB,
             BuildConfig.DISCORD,
+            PlatformInfo(Platform.current),
         )
 
     data class CheckForServerUpdatesPayload(
@@ -43,6 +47,7 @@ class InfoQuery {
         val url: String,
     )
 
+    @RequireAuth
     fun checkForServerUpdates(): CompletableFuture<List<CheckForServerUpdatesPayload>> =
         future {
             AppUpdate.checkUpdate().map {
@@ -54,20 +59,23 @@ class InfoQuery {
             }
         }
 
+    @RequireAuth
     fun aboutWebUI(): CompletableFuture<AboutWebUI> =
         future {
             WebInterfaceManager.getAboutInfo()
         }
 
+    @RequireAuth
     fun checkForWebUIUpdate(): CompletableFuture<WebUIUpdateCheck> =
         future {
             val (version, updateAvailable) = WebInterfaceManager.isUpdateAvailable(WebUIFlavor.current, raiseError = true)
             WebUIUpdateCheck(
-                channel = WebUIChannel.from(serverConfig.webUIChannel.value),
+                channel = serverConfig.webUIChannel.value,
                 tag = version,
                 updateAvailable,
             )
         }
 
+    @RequireAuth
     fun getWebUIUpdateStatus(): WebUIUpdateStatus = WebInterfaceManager.status.value
 }

@@ -3,40 +3,47 @@
 |-----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | ![CI](https://github.com/Suwayomi/Suwayomi-Server/actions/workflows/build_push.yml/badge.svg) | [![stable release](https://img.shields.io/github/release/Suwayomi/Suwayomi-Server.svg?maxAge=3600&label=download)](https://github.com/Suwayomi/Suwayomi-Server/releases) | [![preview](https://img.shields.io/badge/dynamic/json?url=https://github.com/Suwayomi/Suwayomi-Server-preview/raw/main/index.json&label=download&query=$.latest&color=blue)](https://github.com/Suwayomi/Suwayomi-Server-preview/releases/latest) | [![Discord](https://img.shields.io/discord/801021177333940224.svg?label=discord&labelColor=7289da&color=2c2f33&style=flat)](https://discord.gg/DDZdqZWaHA) |
 
-## Table of Content
+## Table of Contents
 - [What is Suwayomi?](#what-is-suwayomi)
-- [Features](#Features)
-- [Suwayomi client projects](#Suwayomi-client-projects)
+  - [Features](#features)
+- [Suwayomi client projects](#suwayomi-client-projects)
+  - [Integrated clients](#integrated-clients)
+  - [Other clients](#other-clients-potentially-inactive-or-abandoned)
 - [Downloading and Running the app](#downloading-and-running-the-app)
-  * [Using Operating System Specific Bundles](#using-operating-system-specific-bundles)
-      - [Launcher Scripts](#launcher-scripts)
-    + [Windows](#windows)
-    + [macOS](#macos)
-    + [GNU/Linux](#gnulinux)
-  * [Other methods of getting Suwayomi](#other-methods-of-getting-suwayomi)
-    + [Arch Linux](#arch-linux)
-    + [Ubuntu-based distributions](#ubuntu-based-distributions)
-    + [Docker](#docker)
-  * [Advanced Methods](#advanced-methods)
-    + [Running the jar release directly](#running-the-jar-release-directly)
-    + [Using Suwayomi Remotely](#using-suwayomi-remotely)
-- [Syncing With Mihon (Tachiyomi)](#syncing-with-mihon-tachiyomi)
-- [Troubleshooting and Support](#troubleshooting-and-support)
-- [Contributing and Technical info](#contributing-and-technical-info)
-- [Credit](#credit)
-- [License](#license)
+  - [Using Operating System Specific Bundles](#using-operating-system-specific-bundles)
+    - [Windows](#windows)
+    - [macOS](#macos)
+    - [GNU/Linux](#gnulinux)
+  - [Other methods of getting Suwayomi](#other-methods-of-getting-suwayomi)
+    - [Docker](#docker)
+    - [Arch Linux](#arch-linux)
+    - [Debian/Ubuntu](#debianubuntu)
+    - [NixOS](#nixos)
+  - [Advanced Methods](#advanced-methods)
+    - [Running the jar release directly](#running-the-jar-release-directly)
+    - [Using Suwayomi Remotely](#using-suwayomi-remotely)
+  - [Syncing With Mihon (Tachiyomi) and Neko](#syncing-with-mihon-tachiyomi-and-neko)
+    - [The Suwayomi extension and tracker](#the-suwayomi-extension-and-tracker)
+    - [The Suwayomi merge source in Neko](#the-suwayomi-merge-source-in-neko)
+    - [Other methods](#other-methods)
+  - [Troubleshooting and Support](#troubleshooting-and-support)
+  - [Contributing and Technical info](#contributing-and-technical-info)
+  - [Translation](#translation)
+  - [Credit](#credit)
+  - [License](#license)
+  - [Disclaimer](#disclaimer)
 <!-- Generated with https://ecotrust-canada.github.io/markdown-toc/ -->
 
 # What is Suwayomi?
 <img src="https://github.com/Suwayomi/Suwayomi-Server/raw/master/server/src/main/resources/icon/faviconlogo.png" alt="drawing" width="200"/>
 
-A free and open source manga reader server that runs extensions built for [Mihon (Tachiyomi)](https://mihon.app/). 
+A free and open source manga reader server that runs extensions built for [Mihon (Tachiyomi)](https://mihon.app/).
 
 Suwayomi is an independent Mihon (Tachiyomi) compatible software and is **not a Fork of** Mihon (Tachiyomi).
 
 Suwayomi-Server is as multi-platform as you can get. Any platform that runs java and/or has a modern browser can run it. This includes Windows, Linux, macOS, chrome OS, etc. Follow [Downloading and Running the app](#downloading-and-running-the-app) for installation instructions.
 
-You can use Mihon (Tachiyomi) to access your Suwayomi-Server. For more info look [here](#syncing-with-mihon-tachiyomi).
+You can use Mihon (Tachiyomi) to access your Suwayomi-Server. For more info look [here](#syncing-with-mihon-tachiyomi-and-neko).
 
 ## Features
 > [!NOTE]
@@ -57,21 +64,25 @@ You can use Mihon (Tachiyomi) to access your Suwayomi-Server. For more info look
 - Automated WebUI updates (supports the default WebUI and VUI)
 - OPDS and OPDS-PSE support (endpoint: `/api/opds/v1.2`)
 
-# Suwayomi client projects
+# Suwayomi Client Projects
 **You need a client/user interface app as a front-end for Suwayomi-Server, if you [Directly Download Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server/releases/latest) you'll get a bundled version of [Suwayomi-WebUI](https://github.com/Suwayomi/Suwayomi-WebUI) with it.**
 
 Here's a list of known clients/user interfaces for Suwayomi-Server (checkout the respective GitHub repository for their features):
-##### Actively Developed Clients
-- [Suwayomi-WebUI](https://github.com/Suwayomi/Suwayomi-WebUI): The web front-end that Suwayomi-Server ships with by default.
-- [Suwayomi-VUI](https://github.com/Suwayomi/Suwayomi-VUI): A Suwayomi-Server preview focused web frontend built with svelte
-- [Tachidesk-VaadinUI](https://github.com/Suwayomi/Tachidesk-VaadinUI): A Web front-end for Suwayomi-Server built with Vaadin.
-##### Inactive Clients (functional but outdated)
-- [Tachidesk-JUI](https://github.com/Suwayomi/Tachidesk-JUI): The native desktop front-end for Suwayomi-Server.
-- [Tachidesk-Sorayomi](https://github.com/Suwayomi/Tachidesk-Sorayomi): A Flutter front-end for Desktop(Linux, windows, etc.), Web and Android with a User Interface inspired by Mihon (Tachiyomi).
-#####  Abandoned Clients (functionality unknown)
-- [Tachidesk-qtui](https://github.com/Suwayomi/Tachidesk-qtui): A C++/Qt front-end for mobile devices(Android/linux), feature support is basic.
-- [Tachidesk-GTK](https://github.com/mahor1221/Tachidesk-GTK): A native Rust/GTK desktop client.
-- [Equinox](https://github.com/Suwayomi/Equinox): A web user interface made with Vue.js.
+
+##### Integrated clients
+
+These clients are built-in options, and the server can keep them automatically up-to-date.
+
+- [Suwayomi-WebUI](https://github.com/Suwayomi/Suwayomi-WebUI): Web app, PWA
+- [Suwayomi-VUI](https://github.com/Suwayomi/Suwayomi-VUI): Web app, PWA
+
+##### Other clients (potentially inactive or abandoned)
+- [Tachidesk-VaadinUI](https://github.com/Suwayomi/Tachidesk-VaadinUI): Desktop app (windows, linux, mac); UI in the browser, manages its own suwayomi server instance
+- [Moku](https://github.com/Youwes09/Moku): Desktop app (windows, linux, mac), can manage its own suwayomi server instance
+- [Tachidesk-JUI](https://github.com/Suwayomi/Tachidesk-JUI): Desktop app (windows, linux, mac); can manage its own suwayomi server instance
+- [Tachidesk-Sorayomi](https://github.com/Suwayomi/Tachidesk-Sorayomi): Web app; Desktop app (windows, linux, mac); Android app; requires access to a running server
+- [Tachidesk-qtui](https://github.com/Suwayomi/Tachidesk-qtui): Android app; iOS app Desktop app (linux); requires access to a running server
+- [Suwayomi Client for KOReader](https://github.com/LK4D4/suwayomi.koplugin): KOReader plugin; works anywhere KOReader can run (Android, Kindle, Kobo, etc.); requires access to a running server
 
 # Downloading and Running the app
 ## Using Operating System Specific Bundles
@@ -94,6 +105,24 @@ Download the latest `linux-x64`(x86_64) release from [the releases section](http
 
 `tar xvf` the downloaded file and double-click on one of the launcher scripts or run them using the terminal.
 
+#### WebView support (GNU/Linux)
+
+WebView support is implemented via [JCEF](https://github.com/JetBrains/jcef).
+This is optional, and is only necessary to support some extensions.
+
+To have a functional WebView, some X11 dependencies are required for rendering Chromium.
+These include `libxrender`, `libxcomposite` `libxdamage`, `libxkbcommon` and `libxtst`.
+
+A CEF server is launched on startup, which loads the X11 libraries.
+If those are missing, you should see "Could not load 'jcef' library".
+If so, use `ldd ~/.local/share/Tachidesk/bin/kcef/libjcef.so | grep not` to figure out which libraries are not found on your system.
+
+Refer to the [Dockerfile](https://github.com/Suwayomi/Suwayomi-Server-docker/blob/main/Dockerfile) for more details.
+
+Note that it is required to have an X session active and available to Suwayomi (i.e. `DISPLAY` is set).
+It is not enough to have `WAYLAND_DISPLAY`, if your environment does not provide xwayland (or if you run Suwayomi as a service), you need to use a tool like [`Xvfb`](https://en.wikipedia.org/wiki/Xvfb).
+The Dockerfile linked above also does this.
+
 ## Other methods of getting Suwayomi
 ### Docker
 Check our Official Docker release [Suwayomi Container](https://github.com/orgs/Suwayomi/packages/container/package/tachidesk) for running Suwayomi Server in a docker container. Source code for our container is available at [docker-tachidesk](https://github.com/Suwayomi/docker-tachidesk), an example compose file can also be found there. By default, the server will be running on http://localhost:4567 open this url in your browser.
@@ -101,7 +130,7 @@ Check our Official Docker release [Suwayomi Container](https://github.com/orgs/S
 ### Arch Linux
 You can install Suwayomi from the AUR:
 ```
-yay -S tachidesk
+yay -S suwayomi-server-bin
 ```
 
 ### Debian/Ubuntu
@@ -156,15 +185,24 @@ Check out [this wiki page](https://github.com/Suwayomi/Suwayomi-Server/wiki/Conf
 
 If you face issues with your setup then we are happy to provide help, just join our discord server(a discord badge is on the top of the page, you are just a click-clack away!).
 
-## Syncing With Mihon (Tachiyomi)
+## Syncing With Mihon (Tachiyomi) and Neko
 ### The Suwayomi extension and tracker
-- You can install the `Suwayomi` extension inside Mihon (Tachiyomi).
+- You can install and configure the `Suwayomi` [extension](https://github.com/Suwayomi/tachiyomi-extension) inside Mihon (Tachiyomi) and forks.
 - The extension will load your Suwayomi library.
 - By manipulating extension search filters you can browse your categories.
 - You can enable the Suwayomi tracker to track reading progress with your Suwayomi server.
   - Note: to sync from
     - Mihon (Tachiyomi) to Suwayomi: Mihon (Tachiyomi) automatically updates the chapters read status when it's updating the tracker (e.g. while reading)
     - Suwayomi to Mihon (Tachiyomi): To sync Mihon (Tachiyomi) with Suwayomi, you have to open the manga's track information, then, Mihon (Tachiyomi) will automatically update its chapter list with the state from Suwayomi
+
+### The Suwayomi merge source in Neko
+- You can enable the `Suwayomi` source in the Merge Source settings
+- You can merge titles in Neko with titles from your Suwayomi library.
+- You can enable 2-way automatic sync to track reading progress with your Suwayomi server.
+  - Note: only applies to merged titles
+    - Neko automatically updates the chapters read status in Suwayomi
+    - During updates, Neko will automatically update its chapter list with the read state from Suwayomi
+    - This only pulls if the status is read, to prevent marking read chapters as unread in Neko
 
 ### Other methods
 Checkout [this issue](https://github.com/Suwayomi/Suwayomi-Server/issues/159) for tracking progress.
@@ -174,6 +212,15 @@ See [this troubleshooting wiki page](https://github.com/Suwayomi/Suwayomi-Server
 
 ## Contributing and Technical info
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## Translation
+Feel free to translate the project on [Weblate](https://hosted.weblate.org/projects/suwayomi/suwayomi-server/)
+
+<details><summary>Translation Progress</summary>
+<a href="https://hosted.weblate.org/engage/suwayomi-server/">
+<img src="https://hosted.weblate.org/widgets/suwayomi/-/suwayomi-server/multi-auto.svg" alt="Translation status" />
+</a>
+</details>
 
 ## Credit
 This project is a spiritual successor of [TachiWeb-Server](https://github.com/Tachiweb/TachiWeb-server), Many of the ideas and the groundwork adopted in this project comes from TachiWeb.

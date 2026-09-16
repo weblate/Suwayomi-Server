@@ -3,7 +3,10 @@ package suwayomi.tachidesk.graphql.types
 import com.expediagroup.graphql.generator.annotations.GraphQLDescription
 import com.expediagroup.graphql.generator.annotations.GraphQLIgnore
 import com.expediagroup.graphql.server.extensions.getValueFromDataLoader
+import com.expediagroup.graphql.server.extensions.getValuesFromDataLoader
 import graphql.schema.DataFetchingEnvironment
+import suwayomi.tachidesk.graphql.types.CategoryNodeList.Companion.toNodeList
+import suwayomi.tachidesk.graphql.types.MangaNodeList.Companion.toNodeList
 import suwayomi.tachidesk.manga.impl.update.CategoryUpdateJob
 import suwayomi.tachidesk.manga.impl.update.CategoryUpdateStatus
 import suwayomi.tachidesk.manga.impl.update.JobStatus
@@ -81,10 +84,11 @@ class UpdateStatusType(
             }
         }
 
-        return dataFetchingEnvironment.getValueFromDataLoader<List<Int>, MangaNodeList>(
-            "MangaForIdsDataLoader",
-            mangaIds,
-        )
+        return dataFetchingEnvironment
+            .getValuesFromDataLoader<Int, MangaType>(
+                "MangaDataLoader",
+                mangaIds,
+            ).thenApply { it.toNodeList() }
     }
 }
 
@@ -93,7 +97,7 @@ class UpdateStatusCategoryType(
     val categoryIds: List<Int>,
 ) {
     fun categories(dataFetchingEnvironment: DataFetchingEnvironment): CompletableFuture<CategoryNodeList> =
-        dataFetchingEnvironment.getValueFromDataLoader("CategoryForIdsDataLoader", categoryIds)
+        dataFetchingEnvironment.getValuesFromDataLoader<Int, CategoryType>("CategoryDataLoader", categoryIds).thenApply { it.toNodeList() }
 }
 
 class LibraryUpdateStatus(
@@ -129,6 +133,7 @@ enum class CategoryJobStatus {
 }
 
 class MangaUpdateType(
+    @get:GraphQLIgnore
     val manga: MangaType,
     val status: MangaJobStatus,
 ) {
@@ -142,6 +147,16 @@ class MangaUpdateType(
             JobStatus.SKIPPED -> MangaJobStatus.SKIPPED
         },
     )
+
+    fun manga(dataFetchingEnvironment: DataFetchingEnvironment): CompletableFuture<MangaType> {
+        // Clearing the data loader cache here everytime should be fine, because a manga gets sent only once for each status
+        val clearCache = status === MangaJobStatus.COMPLETE || status === MangaJobStatus.FAILED
+        if (clearCache) {
+            MangaType.clearCacheFor(manga.id, dataFetchingEnvironment)
+        }
+
+        return dataFetchingEnvironment.getValueFromDataLoader("MangaDataLoader", manga.id)
+    }
 }
 
 class CategoryUpdateType(

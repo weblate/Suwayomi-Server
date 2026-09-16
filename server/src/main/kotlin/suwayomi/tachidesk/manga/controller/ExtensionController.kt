@@ -12,7 +12,10 @@ import io.javalin.http.HttpStatus
 import suwayomi.tachidesk.manga.impl.extension.Extension
 import suwayomi.tachidesk.manga.impl.extension.ExtensionsList
 import suwayomi.tachidesk.manga.model.dataclass.ExtensionDataClass
+import suwayomi.tachidesk.server.JavalinSetup.Attribute
 import suwayomi.tachidesk.server.JavalinSetup.future
+import suwayomi.tachidesk.server.JavalinSetup.getAttribute
+import suwayomi.tachidesk.server.user.requireUser
 import suwayomi.tachidesk.server.util.handler
 import suwayomi.tachidesk.server.util.pathParam
 import suwayomi.tachidesk.server.util.withOperation
@@ -31,6 +34,7 @@ object ExtensionController {
                 }
             },
             behaviorOf = { ctx ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 ctx.future {
                     future {
                         ExtensionsList.getExtensionList()
@@ -55,11 +59,10 @@ object ExtensionController {
                 }
             },
             behaviorOf = { ctx, pkgName ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 ctx.future {
                     future {
                         Extension.installExtension(pkgName)
-                    }.thenApply {
-                        ctx.status(it)
                     }
                 }
             },
@@ -84,6 +87,7 @@ object ExtensionController {
                 }
             },
             behaviorOf = { ctx ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 val uploadedFile = ctx.uploadedFile("file")!!
                 logger.debug { "Uploaded extension file name: " + uploadedFile.filename() }
 
@@ -93,8 +97,6 @@ object ExtensionController {
                             uploadedFile.content(),
                             uploadedFile.filename(),
                         )
-                    }.thenApply {
-                        ctx.status(it)
                     }
                 }
             },
@@ -116,11 +118,10 @@ object ExtensionController {
                 }
             },
             behaviorOf = { ctx, pkgName ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 ctx.future {
                     future {
                         Extension.updateExtension(pkgName)
-                    }.thenApply {
-                        ctx.status(it)
                     }
                 }
             },
@@ -143,6 +144,7 @@ object ExtensionController {
                 }
             },
             behaviorOf = { ctx, pkgName ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 Extension.uninstallExtension(pkgName)
                 ctx.status(200)
             },
@@ -157,16 +159,17 @@ object ExtensionController {
     /** icon for extension named `apkName` */
     val icon =
         handler(
-            pathParam<String>("apkName"),
+            pathParam<String>("pkgName"),
             documentWith = {
                 withOperation {
                     summary("Extension icon")
                     description("Icon for extension named `apkName`")
                 }
             },
-            behaviorOf = { ctx, apkName ->
+            behaviorOf = { ctx, pkgName ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 ctx.future {
-                    future { Extension.getExtensionIcon(apkName) }
+                    future { Extension.getExtensionIcon(pkgName) }
                         .thenApply {
                             ctx.header("content-type", it.second)
                             val httpCacheSeconds = 365.days.inWholeSeconds

@@ -5,6 +5,7 @@ data class OpdsChapterMetadataAcqEntry(
     val mangaId: Int,
     val name: String,
     val uploadDate: Long,
+    val chapterNumber: Float, // Added to fallback chapter titles
     val scanlator: String?,
     val read: Boolean,
     val lastPageRead: Int,
@@ -12,4 +13,6 @@ data class OpdsChapterMetadataAcqEntry(
     val sourceOrder: Int,
     val downloaded: Boolean,
     val pageCount: Int,
+    val url: String?,
+    val cbzFileSize: Long? = null,
 )

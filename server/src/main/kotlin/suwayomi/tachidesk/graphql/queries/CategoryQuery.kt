@@ -10,13 +10,14 @@ package suwayomi.tachidesk.graphql.queries
 import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import com.expediagroup.graphql.server.extensions.getValueFromDataLoader
 import graphql.schema.DataFetchingEnvironment
-import org.jetbrains.exposed.sql.Column
-import org.jetbrains.exposed.sql.Op
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.Column
+import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.greater
+import org.jetbrains.exposed.v1.core.less
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.graphql.queries.filter.BooleanFilter
 import suwayomi.tachidesk.graphql.queries.filter.Filter
 import suwayomi.tachidesk.graphql.queries.filter.HasGetOp
@@ -33,15 +34,16 @@ import suwayomi.tachidesk.graphql.server.primitives.OrderBy
 import suwayomi.tachidesk.graphql.server.primitives.PageInfo
 import suwayomi.tachidesk.graphql.server.primitives.QueryResults
 import suwayomi.tachidesk.graphql.server.primitives.applyBeforeAfter
+import suwayomi.tachidesk.graphql.server.primitives.applySortAndGetPaginationInfo
 import suwayomi.tachidesk.graphql.server.primitives.greaterNotUnique
 import suwayomi.tachidesk.graphql.server.primitives.lessNotUnique
-import suwayomi.tachidesk.graphql.server.primitives.maybeSwap
 import suwayomi.tachidesk.graphql.types.CategoryNodeList
 import suwayomi.tachidesk.graphql.types.CategoryType
 import suwayomi.tachidesk.manga.model.table.CategoryTable
 import java.util.concurrent.CompletableFuture
 
 class CategoryQuery {
+    @RequireAuth
     fun category(
         dataFetchingEnvironment: DataFetchingEnvironment,
         id: Int,
@@ -120,6 +122,7 @@ class CategoryQuery {
             )
     }
 
+    @RequireAuth
     fun categories(
         condition: CategoryCondition? = null,
         filter: CategoryFilter? = null,
@@ -146,21 +149,11 @@ class CategoryQuery {
 
                 res.applyOps(condition, filter)
 
-                if (order != null || orderBy != null || (last != null || before != null)) {
-                    val baseSort = listOf(CategoryOrder(CategoryOrderBy.ID, SortOrder.ASC))
-                    val deprecatedSort = listOfNotNull(orderBy?.let { CategoryOrder(orderBy, orderByType) })
-                    val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
-                    actualSort.forEach { (orderBy, orderByType) ->
-                        val orderByColumn = orderBy.column
-                        val orderType = orderByType.maybeSwap(last ?: before)
+                val baseSort = listOf(CategoryOrder(CategoryOrderBy.ID, SortOrder.ASC))
+                val deprecatedSort = listOfNotNull(orderBy?.let { CategoryOrder(orderBy, orderByType) })
+                val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
 
-                        res.orderBy(orderByColumn to orderType)
-                    }
-                }
-
-                val total = res.count()
-                val firstResult = res.firstOrNull()?.get(CategoryTable.id)?.value
-                val lastResult = res.lastOrNull()?.get(CategoryTable.id)?.value
+                val (total, firstResult, lastResult) = res.applySortAndGetPaginationInfo(actualSort, before, last, CategoryTable.id)
 
                 res.applyBeforeAfter(
                     before = before,

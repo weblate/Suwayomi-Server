@@ -9,6 +9,9 @@ data class OpdsChapterListAcqEntry(
     val scanlator: String?,
     val read: Boolean,
     val lastPageRead: Int,
+    val lastReadAt: Long,
     val sourceOrder: Int,
     val pageCount: Int, // Can be -1 if not known
+    val downloaded: Boolean,
+    val cbzFileSize: Long? = null,
 )

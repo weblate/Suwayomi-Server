@@ -1,5 +1,8 @@
+@file:Suppress("RedundantNullableReturnType", "unused")
+
 package suwayomi.tachidesk.graphql.mutations
 
+import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.manga.impl.util.storage.ImageResponse
 import suwayomi.tachidesk.server.ApplicationDirs
 import uy.kohesive.injekt.injectLazy
@@ -21,6 +24,7 @@ class ImageMutation {
         val cachedPages: Boolean?,
     )
 
+    @RequireAuth
     fun clearCachedImages(input: ClearCachedImagesInput): ClearCachedImagesPayload {
         val (clientMutationId, downloadedThumbnails, cachedThumbnails, cachedPages) = input
 
