@@ -3,10 +3,13 @@ package suwayomi.tachidesk.manga.impl.track.tracker.bangumi
 import kotlinx.serialization.json.Json
 import okhttp3.Interceptor
 import okhttp3.Response
+import suwayomi.tachidesk.manga.impl.track.tracker.bangumi.dto.BGMOAuth
+import suwayomi.tachidesk.manga.impl.track.tracker.bangumi.dto.isExpired
 import suwayomi.tachidesk.server.generated.BuildConfig
 import uy.kohesive.injekt.injectLazy
 
 class BangumiInterceptor(
+    private val userId: Int,
     private val bangumi: Bangumi,
 ) : Interceptor {
     private val json: Json by injectLazy()
@@ -14,7 +17,7 @@ class BangumiInterceptor(
     /**
      * OAuth object used for authenticated requests.
      */
-    private var oauth: BGMOAuth? = bangumi.restoreToken()
+    private var oauth: BGMOAuth? = bangumi.restoreToken(userId)
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val originalRequest = chain.request()
@@ -35,7 +38,7 @@ class BangumiInterceptor(
             .newBuilder()
             .header(
                 "User-Agent",
-                "Suwayomi/Suwayomi-Server/v${BuildConfig.VERSION} (${BuildConfig.GITHUB})",
+                "Suwayomi/Suwayomi-Server/${BuildConfig.VERSION} (${BuildConfig.GITHUB})",
             ).apply {
                 addHeader("Authorization", "Bearer ${currAuth.accessToken}")
             }.build()
@@ -57,6 +60,6 @@ class BangumiInterceptor(
                 )
             }
 
-        bangumi.saveToken(oauth)
+        bangumi.saveToken(userId, oauth)
     }
 }

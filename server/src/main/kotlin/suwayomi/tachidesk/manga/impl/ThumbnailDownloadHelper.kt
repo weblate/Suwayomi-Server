@@ -4,9 +4,14 @@ import suwayomi.tachidesk.manga.impl.download.fileProvider.impl.ThumbnailFilePro
 import java.io.InputStream
 
 object ThumbnailDownloadHelper {
-    fun getImage(mangaId: Int): Pair<InputStream, String> = provider(mangaId).getImage().execute()
+    suspend fun getImage(mangaId: Int): Pair<InputStream, String> = provider(mangaId).getImage().execute()
 
-    fun delete(mangaId: Int): Boolean = provider(mangaId).delete()
+    suspend fun refreshIfStale(
+        mangaId: Int,
+        staleBefore: Long,
+    ) = provider(mangaId).refreshIfStale(staleBefore)
+
+    suspend fun delete(mangaId: Int): Boolean = provider(mangaId).delete()
 
     suspend fun download(mangaId: Int): Boolean = provider(mangaId).download().execute()
 

@@ -17,6 +17,8 @@ import suwayomi.tachidesk.server.serverConfig
 import suwayomi.tachidesk.server.util.Browser.openInBrowser
 import suwayomi.tachidesk.server.util.ExitCode.MutexCheckFailedAnotherAppRunning
 import suwayomi.tachidesk.server.util.ExitCode.MutexCheckFailedTachideskRunning
+import suwayomi.tachidesk.server.util.ServerSubpath
+import tools.jackson.core.JacksonException
 import uy.kohesive.injekt.injectLazy
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -43,9 +45,10 @@ object AppMutex {
                 .connectTimeout(200, TimeUnit.MILLISECONDS)
                 .build()
 
+        val aboutPath = ServerSubpath.maybeAddAsPrefix("/api/v1/settings/about/")
         val request =
             Builder()
-                .url("http://$appIP:${serverConfig.port.value}/api/v1/settings/about/")
+                .url("http://$appIP:${serverConfig.port.value}$aboutPath")
                 .build()
 
         val response =
@@ -62,6 +65,8 @@ object AppMutex {
         return try {
             jsonMapper.fromJsonString<AboutDataClass>(response)
             AppMutexState.TachideskInstanceRunning
+        } catch (e: JacksonException) {
+            AppMutexState.OtherApplicationRunning
         } catch (e: IOException) {
             AppMutexState.OtherApplicationRunning
         }
@@ -72,6 +77,7 @@ object AppMutex {
             AppMutexState.Clear -> {
                 logger.info { "Mutex status is clear, Resuming startup." }
             }
+
             AppMutexState.TachideskInstanceRunning -> {
                 logger.info { "Another instance of Suwayomi-Server is running on $appIP:${serverConfig.port.value}" }
 
@@ -82,6 +88,7 @@ object AppMutex {
 
                 shutdownApp(MutexCheckFailedTachideskRunning)
             }
+
             AppMutexState.OtherApplicationRunning -> {
                 logger.error { "A non Suwayomi-Server application is running on $appIP:${serverConfig.port.value}, aborting startup." }
                 shutdownApp(MutexCheckFailedAnotherAppRunning)

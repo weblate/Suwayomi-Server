@@ -11,8 +11,9 @@ import com.fasterxml.jackson.annotation.JsonIgnore
 import okio.buffer
 import okio.gzip
 import okio.source
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import suwayomi.tachidesk.manga.impl.backup.proto.models.Backup
 import suwayomi.tachidesk.manga.impl.track.tracker.TrackerManager
 import suwayomi.tachidesk.manga.model.table.SourceTable
@@ -27,11 +28,10 @@ object ProtoBackupValidator {
         val missingSourceIds: List<Pair<Long, String>>,
     )
 
-    fun validate(backup: Backup): ValidationResult {
-        if (backup.backupManga.isEmpty()) {
-            throw Exception("Backup does not contain any manga.")
-        }
-
+    fun validate(
+        userId: Int,
+        backup: Backup,
+    ): ValidationResult {
         val sources = backup.getSourceMap()
 
         val missingSources =
@@ -48,7 +48,7 @@ object ProtoBackupValidator {
         val missingTrackers =
             trackers
                 .mapNotNull { TrackerManager.getTracker(it) }
-                .filter { !it.isLoggedIn }
+                .filter { !it.isLoggedIn(userId) }
                 .map { it.name }
                 .sorted()
 
@@ -62,7 +62,10 @@ object ProtoBackupValidator {
         )
     }
 
-    fun validate(sourceStream: InputStream): ValidationResult {
+    fun validate(
+        userId: Int,
+        sourceStream: InputStream,
+    ): ValidationResult {
         val backupString =
             sourceStream
                 .source()
@@ -71,6 +74,6 @@ object ProtoBackupValidator {
                 .use { it.readByteArray() }
         val backup = ProtoBackupImport.parser.decodeFromByteArray(Backup.serializer(), backupString)
 
-        return validate(backup)
+        return validate(userId, backup)
     }
 }

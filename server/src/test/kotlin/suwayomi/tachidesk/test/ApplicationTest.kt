@@ -12,9 +12,14 @@ import eu.kanade.tachiyomi.createAppModule
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.source.local.LocalSource
 import io.github.oshai.kotlinlogging.KotlinLogging
-import org.jetbrains.exposed.sql.Database
+import org.jetbrains.exposed.v1.core.DatabaseConfig
+import org.jetbrains.exposed.v1.core.ExperimentalKeywordApi
+import org.jetbrains.exposed.v1.core.Schema
+import org.jetbrains.exposed.v1.jdbc.Database
 import org.junit.jupiter.api.BeforeAll
 import org.koin.core.context.startKoin
+import org.koin.core.context.stopKoin
+import suwayomi.tachidesk.graphql.types.DatabaseType
 import suwayomi.tachidesk.server.ApplicationDirs
 import suwayomi.tachidesk.server.JavalinSetup
 import suwayomi.tachidesk.server.ServerConfig
@@ -22,8 +27,9 @@ import suwayomi.tachidesk.server.androidCompat
 import suwayomi.tachidesk.server.database.databaseUp
 import suwayomi.tachidesk.server.serverConfig
 import suwayomi.tachidesk.server.serverModule
+import suwayomi.tachidesk.server.settings.SettingsRegistry
 import suwayomi.tachidesk.server.util.AppMutex.handleAppMutex
-import suwayomi.tachidesk.server.util.SystemTray
+import suwayomi.tachidesk.server.util.ConfigTypeRegistration
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import xyz.nulldev.androidcompat.AndroidCompatInitializer
@@ -31,8 +37,14 @@ import xyz.nulldev.androidcompat.androidCompatModule
 import xyz.nulldev.ts.config.CONFIG_PREFIX
 import xyz.nulldev.ts.config.GlobalConfigManager
 import xyz.nulldev.ts.config.configManagerModule
-import java.io.File
 import java.util.Locale
+import kotlin.io.path.Path
+import kotlin.io.path.absolutePathString
+import kotlin.io.path.createDirectories
+import kotlin.io.path.deleteIfExists
+import kotlin.io.path.div
+import kotlin.io.path.exists
+import kotlin.io.path.outputStream
 
 open class ApplicationTest {
     companion object {
@@ -40,8 +52,10 @@ open class ApplicationTest {
         @JvmStatic
         fun beforeAll() {
             if (!initializedTheApp) {
-                val dataRoot = File(BASE_PATH).absolutePath
+                val dataRoot = Path(BASE_PATH).absolutePathString()
                 System.setProperty("$CONFIG_PREFIX.server.rootDir", dataRoot)
+                // Delete if previous config to restart from a fresh state
+                (Path(dataRoot) / "server.conf").deleteIfExists()
 
                 testingSetup()
 
@@ -55,6 +69,13 @@ open class ApplicationTest {
         private var initializedTheApp = false
 
         fun testingSetup() {
+            // register Tachidesk's config which is dubbed "ServerConfig"
+            SettingsRegistry.clear()
+            ConfigTypeRegistration.registerCustomTypes()
+            GlobalConfigManager.registerModule(
+                ServerConfig.register { GlobalConfigManager.config },
+            )
+
             // Application dirs
             val applicationDirs = ApplicationDirs()
 
@@ -62,23 +83,19 @@ open class ApplicationTest {
 
             // make dirs we need
             listOf(
-                applicationDirs.dataRoot,
-                applicationDirs.extensionsRoot,
-                applicationDirs.extensionsRoot + "/icon",
-                applicationDirs.tempThumbnailCacheRoot,
-                applicationDirs.downloadsRoot,
-                applicationDirs.localMangaRoot,
+                Path(applicationDirs.dataRoot),
+                Path(applicationDirs.extensionsRoot),
+                Path(applicationDirs.extensionsRoot) / "icon",
+                Path(applicationDirs.tempThumbnailCacheRoot),
+                Path(applicationDirs.downloadsRoot),
+                Path(applicationDirs.localMangaRoot),
             ).forEach {
-                File(it).mkdirs()
+                it.createDirectories()
             }
-
-            // register Tachidesk's config which is dubbed "ServerConfig"
-            GlobalConfigManager.registerModule(
-                ServerConfig.register { GlobalConfigManager.config },
-            )
 
             // initialize Koin modules
             val app = App()
+            stopKoin()
             startKoin {
                 modules(
                     createAppModule(app),
@@ -101,7 +118,7 @@ open class ApplicationTest {
 
             // create conf file if doesn't exist
             try {
-                val dataConfFile = File("${applicationDirs.dataRoot}/server.conf")
+                val dataConfFile = Path(applicationDirs.dataRoot) / "server.conf"
                 if (!dataConfFile.exists()) {
                     JavalinSetup::class.java.getResourceAsStream("/server-reference.conf").use { input ->
                         dataConfFile.outputStream().use { output ->
@@ -115,7 +132,7 @@ open class ApplicationTest {
 
             // copy local source icon
             try {
-                val localSourceIconFile = File("${applicationDirs.extensionsRoot}/icon/localSource.png")
+                val localSourceIconFile = Path(applicationDirs.extensionsRoot) / "icon" / "localSource.png"
                 if (!localSourceIconFile.exists()) {
                     JavalinSetup::class.java.getResourceAsStream("/icon/localSource.png").use { input ->
                         localSourceIconFile.outputStream().use { output ->
@@ -128,14 +145,14 @@ open class ApplicationTest {
             }
 
             // create system tray
-            if (serverConfig.systemTrayEnabled.value) {
-                try {
-                    SystemTray.create()
-                } catch (e: Throwable) {
-                    // cover both java.lang.Exception and java.lang.Error
-                    e.printStackTrace()
-                }
-            }
+            // if (serverConfig.systemTrayEnabled.value) {
+            //     try {
+            //         SystemTray.create()
+            //     } catch (e: Throwable) {
+            //         // cover both java.lang.Exception and java.lang.Error
+            //         e.printStackTrace()
+            //     }
+            // }
 
             // Disable jetty's logging
             System.setProperty("org.eclipse.jetty.util.log.announce", "false")
@@ -154,8 +171,35 @@ open class ApplicationTest {
             // fixes #119 , ref: https://github.com/Suwayomi/Suwayomi-Server/issues/119#issuecomment-894681292 , source Id calculation depends on String.lowercase()
             Locale.setDefault(Locale.ENGLISH)
 
-            // in-memory database, don't discard database between connections/transactions
-            val db = Database.connect("jdbc:h2:mem:test;DB_CLOSE_DELAY=-1;", "org.h2.Driver")
+            val dbConfig =
+                DatabaseConfig {
+                    useNestedTransactions = true
+                    @OptIn(ExperimentalKeywordApi::class)
+                    preserveKeywordCasing = false
+                    defaultSchema =
+                        when (serverConfig.databaseType.value) {
+                            DatabaseType.POSTGRESQL -> Schema("suwayomi")
+                            DatabaseType.H2 -> null
+                        }
+                }
+
+            val db =
+                when (serverConfig.databaseType.value) {
+                    DatabaseType.POSTGRESQL -> {
+                        Database.connect(
+                            "jdbc:${serverConfig.databaseUrl.value}",
+                            "org.postgresql.Driver",
+                            user = serverConfig.databaseUsername.value,
+                            password = serverConfig.databasePassword.value,
+                            databaseConfig = dbConfig,
+                        )
+                    }
+
+                    DatabaseType.H2 -> {
+                        // in-memory database, don't discard database between connections/transactions
+                        Database.connect("jdbc:h2:mem:test;DB_CLOSE_DELAY=-1;", "org.h2.Driver", databaseConfig = dbConfig)
+                    }
+                }
 
             databaseUp(db)
 

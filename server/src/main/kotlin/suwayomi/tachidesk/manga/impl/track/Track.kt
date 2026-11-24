@@ -6,18 +6,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
-import org.jetbrains.exposed.dao.id.EntityID
-import org.jetbrains.exposed.sql.ResultRow
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.batchInsert
-import org.jetbrains.exposed.sql.deleteWhere
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.statements.BatchUpdateStatement
-import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.update
-import suwayomi.tachidesk.manga.impl.track.tracker.DeletableTrackService
+import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.dao.id.EntityID
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.statements.BatchUpdateStatement
+import org.jetbrains.exposed.v1.jdbc.batchInsert
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.statements.toExecutable
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jsoup.Jsoup
+import suwayomi.tachidesk.manga.impl.track.tracker.DeletableTracker
 import suwayomi.tachidesk.manga.impl.track.tracker.TrackerManager
 import suwayomi.tachidesk.manga.impl.track.tracker.model.Track
 import suwayomi.tachidesk.manga.impl.track.tracker.model.toTrack
@@ -26,11 +27,13 @@ import suwayomi.tachidesk.manga.model.dataclass.MangaTrackerDataClass
 import suwayomi.tachidesk.manga.model.dataclass.TrackSearchDataClass
 import suwayomi.tachidesk.manga.model.dataclass.TrackerDataClass
 import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.manga.model.table.ChapterUserTable
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.finishDate
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.lastChapterRead
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.libraryId
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.mangaId
+import suwayomi.tachidesk.manga.model.table.TrackRecordTable.private
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.remoteId
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.remoteUrl
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.score
@@ -39,7 +42,9 @@ import suwayomi.tachidesk.manga.model.table.TrackRecordTable.status
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.title
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.totalChapters
 import suwayomi.tachidesk.manga.model.table.TrackRecordTable.trackerId
+import suwayomi.tachidesk.manga.model.table.TrackRecordTable.user
 import suwayomi.tachidesk.manga.model.table.TrackSearchTable
+import suwayomi.tachidesk.manga.model.table.getWithUserData
 import suwayomi.tachidesk.manga.model.table.insertAll
 import suwayomi.tachidesk.server.generated.BuildConfig
 import java.io.InputStream
@@ -48,10 +53,10 @@ object Track {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val logger = KotlinLogging.logger {}
 
-    fun getTrackerList(): List<TrackerDataClass> {
+    fun getTrackerList(userId: Int): List<TrackerDataClass> {
         val trackers = TrackerManager.services
         return trackers.map {
-            val isLogin = it.isLoggedIn
+            val isLogin = it.isLoggedIn(userId)
             val authUrl = if (isLogin) null else it.authUrl()
             TrackerDataClass(
                 id = it.id,
@@ -63,18 +68,24 @@ object Track {
         }
     }
 
-    suspend fun login(input: LoginInput) {
+    suspend fun login(
+        userId: Int,
+        input: LoginInput,
+    ) {
         val tracker = TrackerManager.getTracker(input.trackerId)!!
         if (input.callbackUrl != null) {
-            tracker.authCallback(input.callbackUrl)
+            tracker.authCallback(userId, input.callbackUrl)
         } else {
-            tracker.login(input.username ?: "", input.password ?: "")
+            tracker.loginImpl(userId, input.username ?: "", input.password ?: "")
         }
     }
 
-    fun logout(input: LogoutInput) {
+    suspend fun logout(
+        userId: Int,
+        input: LogoutInput,
+    ) {
         val tracker = TrackerManager.getTracker(input.trackerId)!!
-        tracker.logout()
+        tracker.logout(userId)
     }
 
     fun proxyThumbnailUrl(trackerId: Int): String = "/api/v1/track/$trackerId/thumbnail"
@@ -85,12 +96,15 @@ object Track {
         return logo to "image/png"
     }
 
-    fun getTrackRecordsByMangaId(mangaId: Int): List<MangaTrackerDataClass> {
+    fun getTrackRecordsByMangaId(
+        userId: Int,
+        mangaId: Int,
+    ): List<MangaTrackerDataClass> {
         val recordMap =
             transaction {
                 TrackRecordTable
                     .selectAll()
-                    .where { TrackRecordTable.mangaId eq mangaId }
+                    .where { TrackRecordTable.mangaId eq mangaId and (TrackRecordTable.user eq userId) }
                     .map { it.toTrackRecordDataClass() }
             }.associateBy { it.trackerId }
 
@@ -100,9 +114,9 @@ object Track {
             if (record != null) {
                 val track =
                     Track.create(it.id).also { t ->
-                        t.score = record.score.toFloat()
+                        t.score = record.score
                     }
-                record.scoreString = it.displayScore(track)
+                record.scoreString = it.displayScore(userId, track)
             }
             MangaTrackerDataClass(
                 id = it.id,
@@ -110,21 +124,26 @@ object Track {
                 icon = proxyThumbnailUrl(it.id),
                 statusList = it.getStatusList(),
                 statusTextMap = it.getStatusList().associateWith { k -> it.getStatus(k).orEmpty() },
-                scoreList = it.getScoreList(),
+                scoreList = it.getScoreList(userId),
                 record = record,
             )
         }
     }
 
-    suspend fun search(input: SearchInput): List<TrackSearchDataClass> {
+    suspend fun search(
+        userId: Int,
+        input: SearchInput,
+    ): List<TrackSearchDataClass> {
         val tracker = TrackerManager.getTracker(input.trackerId)!!
-        val list = tracker.search(input.title)
+        val list = tracker.search(userId, input.title)
         return list.insertAll().map {
             TrackSearchDataClass(
                 id = it[TrackSearchTable.id].value,
                 trackerId = it[TrackSearchTable.trackerId],
                 remoteId = it[TrackSearchTable.remoteId],
+                libraryId = it[TrackSearchTable.libraryId],
                 title = it[TrackSearchTable.title],
+                lastChapterRead = it[TrackSearchTable.lastChapterRead],
                 totalChapters = it[TrackSearchTable.totalChapters],
                 trackingUrl = it[TrackSearchTable.trackingUrl],
                 coverUrl = it[TrackSearchTable.coverUrl],
@@ -132,6 +151,12 @@ object Track {
                 publishingStatus = it[TrackSearchTable.publishingStatus],
                 publishingType = it[TrackSearchTable.publishingType],
                 startDate = it[TrackSearchTable.startDate],
+                status = it[TrackSearchTable.status],
+                score = it[TrackSearchTable.score],
+                scoreString = null,
+                startedReadingDate = it[TrackSearchTable.startedReadingDate],
+                finishedReadingDate = it[TrackSearchTable.finishedReadingDate],
+                private = it[TrackSearchTable.private],
             )
         }
     }
@@ -139,16 +164,18 @@ object Track {
     private fun ResultRow.toTrackFromSearch(mangaId: Int): Track =
         Track.create(this[TrackSearchTable.trackerId]).also {
             it.manga_id = mangaId
-            it.media_id = this[TrackSearchTable.remoteId]
+            it.remote_id = this[TrackSearchTable.remoteId]
             it.title = this[TrackSearchTable.title]
             it.total_chapters = this[TrackSearchTable.totalChapters]
             it.tracking_url = this[TrackSearchTable.trackingUrl]
         }
 
     suspend fun bind(
+        userId: Int,
         mangaId: Int,
         trackerId: Int,
         remoteId: Long,
+        private: Boolean,
     ) {
         val track =
             transaction {
@@ -163,21 +190,23 @@ object Track {
                         .selectAll()
                         .where {
                             (TrackRecordTable.trackerId eq trackerId) and
-                                (TrackRecordTable.remoteId eq remoteId)
+                                (TrackRecordTable.remoteId eq remoteId) and
+                                (TrackRecordTable.user eq userId)
                         }.first()
                         .toTrack()
-                        .apply {
-                            manga_id = mangaId
-                        }
+            }.apply {
+                this.manga_id = mangaId
+                this.private = private
             }
+
         val tracker = TrackerManager.getTracker(trackerId)!!
 
-        val chapter = queryMaxReadChapter(mangaId)
+        val chapter = queryMaxReadChapter(userId, mangaId)
         val hasReadChapters = chapter != null
         val chapterNumber = chapter?.get(ChapterTable.chapter_number)
 
-        tracker.bind(track, hasReadChapters)
-        val recordId = upsertTrackRecord(track)
+        tracker.bind(userId, track, hasReadChapters)
+        val recordId = upsertTrackRecord(userId, track)
 
         var lastChapterRead: Double? = null
         var startDate: Long? = null
@@ -188,15 +217,16 @@ object Track {
             val oldestChapter =
                 transaction {
                     ChapterTable
+                        .getWithUserData(userId)
                         .selectAll()
                         .where {
-                            (ChapterTable.manga eq mangaId) and (ChapterTable.isRead eq true)
-                        }.orderBy(ChapterTable.lastReadAt to SortOrder.ASC)
+                            (ChapterTable.manga eq mangaId) and (ChapterUserTable.isRead eq true)
+                        }.orderBy(ChapterUserTable.lastReadAt to SortOrder.ASC)
                         .limit(1)
                         .firstOrNull()
                 }
             if (oldestChapter != null) {
-                startDate = oldestChapter[ChapterTable.lastReadAt] * 1000
+                startDate = oldestChapter[ChapterUserTable.lastReadAt] * 1000
             }
         }
         if (lastChapterRead != null || startDate != null) {
@@ -206,51 +236,104 @@ object Track {
                     lastChapterRead = lastChapterRead,
                     startDate = startDate,
                 )
-            update(trackUpdate)
+            update(userId, trackUpdate)
         }
     }
 
-    suspend fun refresh(recordId: Int) {
+    fun bindTrackRecord(
+        userId: Int,
+        mangaId: Int,
+        trackRecordId: Int,
+    ): Int {
+        val (trackRecord, existingTrackRecord) =
+            transaction {
+                val trackRecord =
+                    TrackRecordTable
+                        .selectAll()
+                        .where {
+                            (TrackRecordTable.id eq trackRecordId) and
+                                (TrackRecordTable.user eq userId)
+                        }.first()
+                        .toTrackRecordDataClass()
+
+                val existingTrackRecord =
+                    TrackRecordTable
+                        .selectAll()
+                        .where {
+                            (TrackRecordTable.mangaId eq mangaId) and
+                                (TrackRecordTable.trackerId eq trackRecord.trackerId) and
+                                (TrackRecordTable.user eq userId)
+                        }.firstOrNull()
+                        ?.toTrackRecordDataClass()
+
+                trackRecord to existingTrackRecord
+            }
+
+        val isAlreadyBoundToManga = trackRecord.mangaId == mangaId
+        if (isAlreadyBoundToManga) {
+            return trackRecordId
+        }
+
+        val hasRecordForTracker = existingTrackRecord != null
+        if (hasRecordForTracker) {
+            val updatedTrack = trackRecord.copy(id = existingTrackRecord.id, mangaId = mangaId).toTrack()
+
+            return updateTrackRecord(userId, updatedTrack)
+        }
+
+        val newTrack = trackRecord.copy(mangaId = mangaId).toTrack()
+
+        return insertTrackRecord(userId, newTrack)
+    }
+
+    suspend fun refresh(
+        userId: Int,
+        recordId: Int,
+    ) {
         val recordDb =
             transaction {
-                TrackRecordTable.selectAll().where { TrackRecordTable.id eq recordId }.first()
+                TrackRecordTable.selectAll().where { TrackRecordTable.id eq recordId and (TrackRecordTable.user eq userId) }.first()
             }
 
         val tracker = TrackerManager.getTracker(recordDb[TrackRecordTable.trackerId])!!
 
         val track = recordDb.toTrack()
-        tracker.refresh(track)
-        upsertTrackRecord(track)
+        tracker.refresh(userId, track)
+        upsertTrackRecord(userId, track)
     }
 
     suspend fun unbind(
+        userId: Int,
         recordId: Int,
         deleteRemoteTrack: Boolean? = false,
     ) {
         val recordDb =
             transaction {
-                TrackRecordTable.selectAll().where { TrackRecordTable.id eq recordId }.first()
+                TrackRecordTable.selectAll().where { TrackRecordTable.id eq recordId and (TrackRecordTable.user eq userId) }.first()
             }
 
         val tracker = TrackerManager.getTracker(recordDb[TrackRecordTable.trackerId])
 
-        if (deleteRemoteTrack == true && tracker is DeletableTrackService) {
-            tracker.delete(recordDb.toTrack())
+        if (deleteRemoteTrack == true && tracker is DeletableTracker) {
+            tracker.delete(userId, recordDb.toTrack())
         }
 
         transaction {
-            TrackRecordTable.deleteWhere { TrackRecordTable.id eq recordId }
+            TrackRecordTable.deleteWhere { TrackRecordTable.id eq recordId and (TrackRecordTable.user eq userId) }
         }
     }
 
-    suspend fun update(input: UpdateInput) {
+    suspend fun update(
+        userId: Int,
+        input: UpdateInput,
+    ) {
         if (input.unbind == true) {
-            unbind(input.recordId)
+            unbind(userId, input.recordId)
             return
         }
         val recordDb =
             transaction {
-                TrackRecordTable.selectAll().where { TrackRecordTable.id eq input.recordId }.first()
+                TrackRecordTable.selectAll().where { TrackRecordTable.id eq input.recordId and (TrackRecordTable.user eq userId) }.first()
             }
 
         val tracker = TrackerManager.getTracker(recordDb[TrackRecordTable.trackerId])!!
@@ -277,9 +360,8 @@ object Track {
             }
         }
         if (input.scoreString != null) {
-            val score = tracker.indexToScore(tracker.getScoreList().indexOf(input.scoreString))
-            // conversion issues between Float <-> Double so convert to string before double
-            recordDb[TrackRecordTable.score] = score.toString().toDouble()
+            val score = tracker.indexToScore(userId, tracker.getScoreList(userId).indexOf(input.scoreString))
+            recordDb[TrackRecordTable.score] = score
         }
         if (input.startDate != null) {
             recordDb[TrackRecordTable.startDate] = input.startDate
@@ -287,26 +369,35 @@ object Track {
         if (input.finishDate != null) {
             recordDb[TrackRecordTable.finishDate] = input.finishDate
         }
+        if (input.private != null) {
+            recordDb[TrackRecordTable.private] = input.private
+        }
 
         val track = recordDb.toTrack()
-        tracker.update(track)
+        tracker.update(userId, track)
 
-        upsertTrackRecord(track)
+        upsertTrackRecord(userId, track)
     }
 
-    fun asyncTrackChapter(mangaIds: Set<Int>) {
-        if (!TrackerManager.hasLoggedTracker()) {
+    fun asyncTrackChapter(
+        userId: Int,
+        mangaIds: Set<Int>,
+    ) {
+        if (!TrackerManager.hasLoggedTracker(userId)) {
             return
         }
         scope.launch {
             mangaIds.forEach {
-                trackChapter(it)
+                trackChapter(userId, it)
             }
         }
     }
 
-    suspend fun trackChapter(mangaId: Int) {
-        val chapter = queryMaxReadChapter(mangaId)
+    suspend fun trackChapter(
+        userId: Int,
+        mangaId: Int,
+    ) {
+        val chapter = queryMaxReadChapter(userId, mangaId)
         val chapterNumber = chapter?.get(ChapterTable.chapter_number)
 
         logger.info {
@@ -314,21 +405,26 @@ object Track {
         }
 
         if (chapterNumber != null && chapterNumber > 0) {
-            trackChapter(mangaId, chapterNumber.toDouble())
+            trackChapter(userId, mangaId, chapterNumber.toDouble())
         }
     }
 
-    private fun queryMaxReadChapter(mangaId: Int): ResultRow? =
+    private fun queryMaxReadChapter(
+        userId: Int,
+        mangaId: Int,
+    ): ResultRow? =
         transaction {
             ChapterTable
+                .getWithUserData(userId)
                 .selectAll()
-                .where { (ChapterTable.manga eq mangaId) and (ChapterTable.isRead eq true) }
+                .where { (ChapterTable.manga eq mangaId) and (ChapterUserTable.isRead eq true) }
                 .orderBy(ChapterTable.chapter_number to SortOrder.DESC)
                 .limit(1)
                 .firstOrNull()
         }
 
     private suspend fun trackChapter(
+        userId: Int,
         mangaId: Int,
         chapterNumber: Double,
     ) {
@@ -336,13 +432,13 @@ object Track {
             transaction {
                 TrackRecordTable
                     .selectAll()
-                    .where { TrackRecordTable.mangaId eq mangaId }
+                    .where { TrackRecordTable.mangaId eq mangaId and (TrackRecordTable.user eq userId) }
                     .toList()
             }
 
         records.forEach {
             try {
-                trackChapterForTracker(it, chapterNumber)
+                trackChapterForTracker(userId, it, chapterNumber)
             } catch (e: Exception) {
                 KotlinLogging
                     .logger("${logger.name}::trackChapter(mangaId= $mangaId, chapterNumber= $chapterNumber)")
@@ -352,6 +448,7 @@ object Track {
     }
 
     private suspend fun trackChapterForTracker(
+        userId: Int,
         it: ResultRow,
         chapterNumber: Double,
     ) {
@@ -371,85 +468,108 @@ object Track {
             return
         }
 
-        if (!tracker.isLoggedIn) {
-            upsertTrackRecord(track)
+        if (!tracker.isLoggedIn(userId)) {
+            upsertTrackRecord(userId, track)
             return
         }
 
-        tracker.refresh(track)
-        upsertTrackRecord(track)
+        tracker.refresh(userId, track)
+        upsertTrackRecord(userId, track)
 
         val lastChapterRead = track.last_chapter_read
 
         log.debug { "remoteLastReadChapter= $lastChapterRead" }
 
         if (chapterNumber > lastChapterRead) {
-            track.last_chapter_read = chapterNumber.toFloat()
-            tracker.update(track, true)
-            upsertTrackRecord(track)
+            track.last_chapter_read = chapterNumber
+            tracker.update(userId, track, true)
+            upsertTrackRecord(userId, track)
         }
     }
 
-    fun upsertTrackRecord(track: Track): Int =
+    fun upsertTrackRecord(
+        userId: Int,
+        track: Track,
+    ): Int =
         transaction {
             val existingRecord =
                 TrackRecordTable
                     .selectAll()
                     .where {
                         (TrackRecordTable.mangaId eq track.manga_id) and
-                            (TrackRecordTable.trackerId eq track.sync_id)
+                            (TrackRecordTable.trackerId eq track.tracker_id) and
+                            (TrackRecordTable.user eq userId)
                     }.singleOrNull()
 
             if (existingRecord != null) {
-                updateTrackRecord(track)
-                existingRecord[TrackRecordTable.id].value
+                track.id = existingRecord[TrackRecordTable.id].value
+                updateTrackRecord(userId, track)
+                track.id!!
             } else {
-                insertTrackRecord(track)
+                insertTrackRecord(userId, track)
             }
         }
 
-    fun updateTrackRecord(track: Track) = updateTrackRecords(listOf(track))
+    fun updateTrackRecord(
+        userId: Int,
+        track: Track,
+    ): Int = updateTrackRecords(userId, listOf(track)).first()
 
-    fun updateTrackRecords(tracks: List<Track>) =
+    fun updateTrackRecords(
+        userId: Int,
+        tracks: List<Track>,
+    ): List<Int> =
         transaction {
             if (tracks.isNotEmpty()) {
-                BatchUpdateStatement(TrackRecordTable).apply {
-                    tracks.forEach {
-                        addBatch(EntityID(it.id!!, TrackRecordTable))
-                        this[remoteId] = it.media_id
-                        this[libraryId] = it.library_id
-                        this[title] = it.title
-                        this[lastChapterRead] = it.last_chapter_read.toDouble()
-                        this[totalChapters] = it.total_chapters
-                        this[status] = it.status
-                        this[score] = it.score.toDouble()
-                        this[remoteUrl] = it.tracking_url
-                        this[startDate] = it.started_reading_date
-                        this[finishDate] = it.finished_reading_date
-                    }
-                    execute(this@transaction)
-                }
+                BatchUpdateStatement(TrackRecordTable)
+                    .apply {
+                        tracks.forEach {
+                            addBatch(EntityID(it.id!!, TrackRecordTable))
+                            this[remoteId] = it.remote_id
+                            this[libraryId] = it.library_id
+                            this[title] = it.title
+                            this[lastChapterRead] = it.last_chapter_read
+                            this[totalChapters] = it.total_chapters
+                            this[status] = it.status
+                            this[score] = it.score
+                            this[remoteUrl] = it.tracking_url
+                            this[startDate] = it.started_reading_date
+                            this[finishDate] = it.finished_reading_date
+                            this[private] = it.private
+                        }
+                    }.toExecutable()
+                    .execute(this@transaction)
             }
+
+            tracks.map { it.id!! }
         }
 
-    fun insertTrackRecord(track: Track): Int = insertTrackRecords(listOf(track)).first()
+    fun insertTrackRecord(
+        userId: Int,
+        track: Track,
+    ): Int = insertTrackRecords(userId, listOf(track)).first()
 
-    fun insertTrackRecords(tracks: List<Track>): List<Int> =
+    fun insertTrackRecords(
+        userId: Int,
+        tracks: List<Track>,
+    ): List<Int> =
         transaction {
             TrackRecordTable
                 .batchInsert(tracks) {
                     this[mangaId] = it.manga_id
-                    this[trackerId] = it.sync_id
-                    this[remoteId] = it.media_id
+                    this[trackerId] = it.tracker_id
+                    this[remoteId] = it.remote_id
                     this[libraryId] = it.library_id
                     this[title] = it.title
-                    this[lastChapterRead] = it.last_chapter_read.toDouble()
+                    this[lastChapterRead] = it.last_chapter_read
                     this[totalChapters] = it.total_chapters
                     this[status] = it.status
-                    this[score] = it.score.toDouble()
+                    this[score] = it.score
                     this[remoteUrl] = it.tracking_url
                     this[startDate] = it.started_reading_date
                     this[finishDate] = it.finished_reading_date
+                    this[private] = it.private
+                    this[user] = userId
                 }.map { it[TrackRecordTable.id].value }
         }
 
@@ -481,5 +601,8 @@ object Track {
         val startDate: Long? = null,
         val finishDate: Long? = null,
         val unbind: Boolean? = null,
+        val private: Boolean? = null,
     )
+
+    fun String.htmlDecode(): String = Jsoup.parse(this).wholeText()
 }

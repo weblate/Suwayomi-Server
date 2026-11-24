@@ -2,7 +2,6 @@ package suwayomi.tachidesk.manga.impl.update
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
 import suwayomi.tachidesk.manga.model.dataclass.CategoryDataClass
 import suwayomi.tachidesk.manga.model.dataclass.MangaDataClass
 
@@ -31,18 +30,28 @@ class TestUpdater : IUpdater {
         TODO("Not yet implemented")
     }
 
+    override fun deleteLastAutomatedUpdateTimestamp() {
+        TODO("Not yet implemented")
+    }
+
     override fun addCategoriesToUpdateQueue(
+        userId: Int,
         categories: List<CategoryDataClass>,
         clear: Boolean?,
         forceAll: Boolean,
+        automatedUpdate: Boolean,
     ) {
         TODO("Not yet implemented")
     }
 
-    override fun addMangasToQueue(mangas: List<MangaDataClass>) {
+    override fun addMangasToQueue(
+        mangas: List<MangaDataClass>,
+        userId: Int?,
+    ) {
         TODO("Not yet implemented")
     }
 
+    @Deprecated("Replaced with updates", replaceWith = ReplaceWith("updates"))
     override val status: Flow<UpdateStatus>
         get() = TODO("Not yet implemented")
     override val updates: Flow<UpdateUpdates>

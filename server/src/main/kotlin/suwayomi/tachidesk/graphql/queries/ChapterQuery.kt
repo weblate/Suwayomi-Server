@@ -8,19 +8,21 @@
 package suwayomi.tachidesk.graphql.queries
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
+import com.expediagroup.graphql.generator.annotations.GraphQLIgnore
 import com.expediagroup.graphql.server.extensions.getValueFromDataLoader
 import graphql.schema.DataFetchingEnvironment
-import org.jetbrains.exposed.sql.Column
-import org.jetbrains.exposed.sql.Op
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
-import org.jetbrains.exposed.sql.andWhere
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.Column
+import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.greater
+import org.jetbrains.exposed.v1.core.less
+import org.jetbrains.exposed.v1.jdbc.andWhere
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.graphql.queries.filter.BooleanFilter
+import suwayomi.tachidesk.graphql.queries.filter.DoubleFilter
 import suwayomi.tachidesk.graphql.queries.filter.Filter
-import suwayomi.tachidesk.graphql.queries.filter.FloatFilter
 import suwayomi.tachidesk.graphql.queries.filter.HasGetOp
 import suwayomi.tachidesk.graphql.queries.filter.IntFilter
 import suwayomi.tachidesk.graphql.queries.filter.LongFilter
@@ -30,19 +32,24 @@ import suwayomi.tachidesk.graphql.queries.filter.andFilterWithCompare
 import suwayomi.tachidesk.graphql.queries.filter.andFilterWithCompareEntity
 import suwayomi.tachidesk.graphql.queries.filter.andFilterWithCompareString
 import suwayomi.tachidesk.graphql.queries.filter.applyOps
+import suwayomi.tachidesk.graphql.queries.filter.coalesceDefault
 import suwayomi.tachidesk.graphql.server.primitives.Cursor
 import suwayomi.tachidesk.graphql.server.primitives.Order
 import suwayomi.tachidesk.graphql.server.primitives.OrderBy
 import suwayomi.tachidesk.graphql.server.primitives.PageInfo
+import suwayomi.tachidesk.graphql.server.primitives.PaginationNeeds
 import suwayomi.tachidesk.graphql.server.primitives.QueryResults
 import suwayomi.tachidesk.graphql.server.primitives.applyBeforeAfter
+import suwayomi.tachidesk.graphql.server.primitives.applySortAndGetPaginationInfo
 import suwayomi.tachidesk.graphql.server.primitives.greaterNotUnique
 import suwayomi.tachidesk.graphql.server.primitives.lessNotUnique
-import suwayomi.tachidesk.graphql.server.primitives.maybeSwap
 import suwayomi.tachidesk.graphql.types.ChapterNodeList
 import suwayomi.tachidesk.graphql.types.ChapterType
 import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.manga.model.table.ChapterUserTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
+import suwayomi.tachidesk.manga.model.table.MangaUserTable
+import suwayomi.tachidesk.manga.model.table.getWithUserData
 import java.util.concurrent.CompletableFuture
 
 /**
@@ -51,6 +58,7 @@ import java.util.concurrent.CompletableFuture
  * - Get page list?
  */
 class ChapterQuery {
+    @RequireAuth
     fun chapter(
         dataFetchingEnvironment: DataFetchingEnvironment,
         id: Int,
@@ -64,7 +72,7 @@ class ChapterQuery {
         NAME(ChapterTable.name),
         UPLOAD_DATE(ChapterTable.date_upload),
         CHAPTER_NUMBER(ChapterTable.chapter_number),
-        LAST_READ_AT(ChapterTable.lastReadAt),
+        LAST_READ_AT(ChapterUserTable.lastReadAt),
         FETCHED_AT(ChapterTable.fetchedAt),
         ;
 
@@ -75,7 +83,7 @@ class ChapterQuery {
                 NAME -> greaterNotUnique(ChapterTable.name, ChapterTable.id, cursor, String::toString)
                 UPLOAD_DATE -> greaterNotUnique(ChapterTable.date_upload, ChapterTable.id, cursor, String::toLong)
                 CHAPTER_NUMBER -> greaterNotUnique(ChapterTable.chapter_number, ChapterTable.id, cursor, String::toFloat)
-                LAST_READ_AT -> greaterNotUnique(ChapterTable.lastReadAt, ChapterTable.id, cursor, String::toLong)
+                LAST_READ_AT -> greaterNotUnique(ChapterUserTable.lastReadAt, ChapterTable.id, cursor, String::toLong)
                 FETCHED_AT -> greaterNotUnique(ChapterTable.fetchedAt, ChapterTable.id, cursor, String::toLong)
             }
 
@@ -86,7 +94,7 @@ class ChapterQuery {
                 NAME -> lessNotUnique(ChapterTable.name, ChapterTable.id, cursor, String::toString)
                 UPLOAD_DATE -> lessNotUnique(ChapterTable.date_upload, ChapterTable.id, cursor, String::toLong)
                 CHAPTER_NUMBER -> lessNotUnique(ChapterTable.chapter_number, ChapterTable.id, cursor, String::toFloat)
-                LAST_READ_AT -> lessNotUnique(ChapterTable.lastReadAt, ChapterTable.id, cursor, String::toLong)
+                LAST_READ_AT -> lessNotUnique(ChapterUserTable.lastReadAt, ChapterTable.id, cursor, String::toLong)
                 FETCHED_AT -> lessNotUnique(ChapterTable.fetchedAt, ChapterTable.id, cursor, String::toLong)
             }
 
@@ -127,8 +135,8 @@ class ChapterQuery {
         val fetchedAt: Long? = null,
         val isDownloaded: Boolean? = null,
         val pageCount: Int? = null,
-    ) : HasGetOp {
-        override fun getOp(): Op<Boolean>? {
+    ) : HasGetOp<Any?> {
+        override fun getOp(value: Any?): Op<Boolean>? {
             val opAnd = OpAnd()
             opAnd.eq(id, ChapterTable.id)
             opAnd.eq(url, ChapterTable.url)
@@ -137,14 +145,14 @@ class ChapterQuery {
             opAnd.eq(chapterNumber, ChapterTable.chapter_number)
             opAnd.eq(scanlator, ChapterTable.scanlator)
             opAnd.eq(mangaId, ChapterTable.manga)
-            opAnd.eq(isRead, ChapterTable.isRead)
-            opAnd.eq(isBookmarked, ChapterTable.isBookmarked)
-            opAnd.eq(lastPageRead, ChapterTable.lastPageRead)
-            opAnd.eq(lastReadAt, ChapterTable.lastReadAt)
+            opAnd.eq(isRead, coalesceDefault(ChapterUserTable.isRead, false))
+            opAnd.eq(isBookmarked, coalesceDefault(ChapterUserTable.isBookmarked, false))
+            opAnd.eq(lastPageRead, coalesceDefault(ChapterUserTable.lastPageRead, 0))
+            opAnd.eq(lastReadAt, coalesceDefault(ChapterUserTable.lastReadAt, 0L))
             opAnd.eq(sourceOrder, ChapterTable.sourceOrder)
             opAnd.eq(realUrl, ChapterTable.realUrl)
             opAnd.eq(fetchedAt, ChapterTable.fetchedAt)
-            opAnd.eq(isDownloaded, ChapterTable.isDownloaded)
+            opAnd.eq(isDownloaded, coalesceDefault(ChapterUserTable.isDownloaded, false))
             opAnd.eq(pageCount, ChapterTable.pageCount)
 
             return opAnd.op
@@ -156,7 +164,7 @@ class ChapterQuery {
         val url: StringFilter? = null,
         val name: StringFilter? = null,
         val uploadDate: LongFilter? = null,
-        val chapterNumber: FloatFilter? = null,
+        val chapterNumber: DoubleFilter? = null,
         val scanlator: StringFilter? = null,
         val mangaId: IntFilter? = null,
         val isRead: BooleanFilter? = null,
@@ -172,31 +180,35 @@ class ChapterQuery {
         override val and: List<ChapterFilter>? = null,
         override val or: List<ChapterFilter>? = null,
         override val not: ChapterFilter? = null,
-    ) : Filter<ChapterFilter> {
-        override fun getOpList(): List<Op<Boolean>> =
+    ) : Filter<ChapterFilter, Any?> {
+        override fun getOpList(value: Any?): List<Op<Boolean>> =
             listOfNotNull(
                 andFilterWithCompareEntity(ChapterTable.id, id),
                 andFilterWithCompareString(ChapterTable.url, url),
                 andFilterWithCompareString(ChapterTable.name, name),
                 andFilterWithCompare(ChapterTable.date_upload, uploadDate),
-                andFilterWithCompare(ChapterTable.chapter_number, chapterNumber),
+                andFilterWithCompare(ChapterTable.chapter_number, chapterNumber?.toFloatFilter()),
                 andFilterWithCompareString(ChapterTable.scanlator, scanlator),
                 andFilterWithCompareEntity(ChapterTable.manga, mangaId),
-                andFilterWithCompare(ChapterTable.isRead, isRead),
-                andFilterWithCompare(ChapterTable.isBookmarked, isBookmarked),
-                andFilterWithCompare(ChapterTable.lastPageRead, lastPageRead),
-                andFilterWithCompare(ChapterTable.lastReadAt, lastReadAt),
+                andFilterWithCompare(coalesceDefault(ChapterUserTable.isRead, false), isRead),
+                andFilterWithCompare(coalesceDefault(ChapterUserTable.isBookmarked, false), isBookmarked),
+                andFilterWithCompare(coalesceDefault(ChapterUserTable.lastPageRead, 0), lastPageRead),
+                andFilterWithCompare(coalesceDefault(ChapterUserTable.lastReadAt, 0L), lastReadAt),
                 andFilterWithCompare(ChapterTable.sourceOrder, sourceOrder),
                 andFilterWithCompareString(ChapterTable.realUrl, realUrl),
                 andFilterWithCompare(ChapterTable.fetchedAt, fetchedAt),
-                andFilterWithCompare(ChapterTable.isDownloaded, isDownloaded),
+                andFilterWithCompare(coalesceDefault(ChapterUserTable.isDownloaded, false), isDownloaded),
                 andFilterWithCompare(ChapterTable.pageCount, pageCount),
             )
 
-        fun getLibraryOp() = andFilterWithCompare(MangaTable.inLibrary, inLibrary)
+        fun getLibraryOp() = andFilterWithCompare(MangaUserTable.inLibrary, inLibrary)
     }
 
+    @RequireAuth
     fun chapters(
+        @GraphQLIgnore
+        userId: Int,
+        dataFetchingEnvironment: DataFetchingEnvironment,
         condition: ChapterCondition? = null,
         filter: ChapterFilter? = null,
         @GraphQLDeprecated(
@@ -218,33 +230,30 @@ class ChapterQuery {
     ): ChapterNodeList {
         val queryResults =
             transaction {
-                val res = ChapterTable.selectAll()
+                val res = ChapterTable.getWithUserData(userId).selectAll()
 
                 val libraryOp = filter?.getLibraryOp()
                 if (libraryOp != null) {
                     res.adjustColumnSet {
-                        innerJoin(MangaTable)
+                        innerJoin(MangaTable.getWithUserData(userId))
                     }
                     res.andWhere { libraryOp }
                 }
 
-                res.applyOps(condition, filter)
+                res.applyOps(null, condition, filter)
 
-                if (order != null || orderBy != null || (last != null || before != null)) {
-                    val baseSort = listOf(ChapterOrder(ChapterOrderBy.ID, SortOrder.ASC))
-                    val deprecatedSort = listOfNotNull(orderBy?.let { ChapterOrder(orderBy, orderByType) })
-                    val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
-                    actualSort.forEach { (orderBy, orderByType) ->
-                        val orderByColumn = orderBy.column
-                        val orderType = orderByType.maybeSwap(last ?: before)
+                val baseSort = listOf(ChapterOrder(ChapterOrderBy.ID, SortOrder.ASC))
+                val deprecatedSort = listOfNotNull(orderBy?.let { ChapterOrder(orderBy, orderByType) })
+                val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
 
-                        res.orderBy(orderByColumn to orderType)
-                    }
-                }
-
-                val total = res.count()
-                val firstResult = res.firstOrNull()?.get(ChapterTable.id)?.value
-                val lastResult = res.lastOrNull()?.get(ChapterTable.id)?.value
+                val (total, firstResult, lastResult) =
+                    res.applySortAndGetPaginationInfo(
+                        actualSort,
+                        before,
+                        last,
+                        ChapterTable.id,
+                        PaginationNeeds.of(dataFetchingEnvironment),
+                    )
 
                 res.applyBeforeAfter(
                     before = before,

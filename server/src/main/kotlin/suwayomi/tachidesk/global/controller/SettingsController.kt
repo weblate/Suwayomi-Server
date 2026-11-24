@@ -10,9 +10,9 @@ package suwayomi.tachidesk.global.controller
 import io.javalin.http.HttpStatus
 import suwayomi.tachidesk.global.impl.About
 import suwayomi.tachidesk.global.impl.AboutDataClass
-import suwayomi.tachidesk.global.impl.AppUpdate
-import suwayomi.tachidesk.global.impl.UpdateDataClass
-import suwayomi.tachidesk.server.JavalinSetup.future
+import suwayomi.tachidesk.server.JavalinSetup.Attribute
+import suwayomi.tachidesk.server.JavalinSetup.getAttribute
+import suwayomi.tachidesk.server.user.requireUser
 import suwayomi.tachidesk.server.util.handler
 import suwayomi.tachidesk.server.util.withOperation
 
@@ -28,30 +28,11 @@ object SettingsController {
                 }
             },
             behaviorOf = { ctx ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
                 ctx.json(About.getAbout())
             },
             withResults = {
                 json<AboutDataClass>(HttpStatus.OK)
-            },
-        )
-
-    /** check for app updates */
-    val checkUpdate =
-        handler(
-            documentWith = {
-                withOperation {
-                    summary("Suwayomi-Server update check")
-                    description("Check for app updates")
-                }
-            },
-            behaviorOf = { ctx ->
-                ctx.future {
-                    future { AppUpdate.checkUpdate() }
-                        .thenApply { ctx.json(it) }
-                }
-            },
-            withResults = {
-                json<Array<UpdateDataClass>>(HttpStatus.OK)
             },
         )
 }

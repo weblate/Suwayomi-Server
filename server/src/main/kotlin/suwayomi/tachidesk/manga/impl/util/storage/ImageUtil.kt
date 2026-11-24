@@ -62,13 +62,19 @@ object ImageUtil {
             if (bytes.compareWith("RIFF".toByteArray())) {
                 return WEBP
             }
-            if (bytes.copyOfRange(4, 12).compareWith("ftypavif".toByteArray())) {
+            val fileType = bytes.copyOfRange(4, 12)
+            if (fileType.contentEquals("ftypavif".toByteArray()) ||
+                fileType.contentEquals("ftypavis".toByteArray())
+            ) {
                 return AVIF
             }
             if (isHEIF(bytes)) {
                 return HEIF
             }
             if (bytes.compareWith(charByteArrayOf(0xFF, 0x0A))) {
+                return JXL
+            }
+            if (bytes.compareWith(charByteArrayOf(0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A))) {
                 return JXL
             }
         } catch (_: Exception) {

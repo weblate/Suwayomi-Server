@@ -4,12 +4,7 @@ import eu.kanade.tachiyomi.source.local.metadata.COMIC_INFO_FILE
 import eu.kanade.tachiyomi.source.local.metadata.ComicInfo
 import eu.kanade.tachiyomi.source.local.metadata.ComicInfoPublishingStatus
 import nl.adaptivity.xmlutil.serialization.XML
-import org.jetbrains.exposed.sql.ResultRow
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
-import suwayomi.tachidesk.manga.model.table.CategoryMangaTable
-import suwayomi.tachidesk.manga.model.table.CategoryTable
+import org.jetbrains.exposed.v1.core.ResultRow
 import suwayomi.tachidesk.manga.model.table.ChapterTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import uy.kohesive.injekt.Injekt
@@ -25,7 +20,6 @@ fun getComicInfo(
     manga: ResultRow,
     chapter: ResultRow,
     chapterUrl: String,
-    categories: List<String>?,
 ): ComicInfo {
     val dateUpload = chapter[ChapterTable.date_upload]
     val localDate =
@@ -52,7 +46,7 @@ fun getComicInfo(
             ComicInfo.PublishingStatusTachiyomi(
                 ComicInfoPublishingStatus.toComicInfoValue(manga[MangaTable.status].toLong()),
             ),
-        categories = categories?.let { ComicInfo.CategoriesTachiyomi(it.joinToString()) },
+        categories = null, // Removed due to user accounts
         inker = null,
         colorist = null,
         letterer = null,
@@ -73,19 +67,7 @@ fun createComicInfoFile(
     chapter: ResultRow,
 ) {
     val chapterUrl = chapter[ChapterTable.realUrl].orEmpty()
-    val categories =
-        transaction {
-            CategoryMangaTable
-                .innerJoin(CategoryTable)
-                .selectAll()
-                .where {
-                    CategoryMangaTable.manga eq manga[MangaTable.id]
-                }.orderBy(CategoryTable.order to SortOrder.ASC)
-                .map {
-                    it[CategoryTable.name]
-                }
-        }.takeUnless { it.isEmpty() }
-    val comicInfo = getComicInfo(manga, chapter, chapterUrl, categories)
+    val comicInfo = getComicInfo(manga, chapter, chapterUrl)
     // Remove the old file
     (dir / COMIC_INFO_FILE).deleteIfExists()
     (dir / COMIC_INFO_FILE).outputStream().use {

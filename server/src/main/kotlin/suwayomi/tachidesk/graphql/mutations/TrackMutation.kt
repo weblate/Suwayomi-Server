@@ -1,12 +1,15 @@
+@file:Suppress("RedundantNullableReturnType", "unused")
+
 package suwayomi.tachidesk.graphql.mutations
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import com.expediagroup.graphql.generator.annotations.GraphQLDescription
-import graphql.execution.DataFetcherResult
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
-import suwayomi.tachidesk.graphql.asDataFetcherResult
+import com.expediagroup.graphql.generator.annotations.GraphQLIgnore
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.graphql.types.TrackRecordType
 import suwayomi.tachidesk.graphql.types.TrackerType
 import suwayomi.tachidesk.manga.impl.track.Track
@@ -28,14 +31,19 @@ class TrackMutation {
         val tracker: TrackerType,
     )
 
-    fun loginTrackerOAuth(input: LoginTrackerOAuthInput): CompletableFuture<LoginTrackerOAuthPayload> {
+    @RequireAuth
+    fun loginTrackerOAuth(
+        @GraphQLIgnore
+        userId: Int,
+        input: LoginTrackerOAuthInput,
+    ): CompletableFuture<LoginTrackerOAuthPayload> {
         val tracker =
             requireNotNull(TrackerManager.getTracker(input.trackerId)) {
                 "Could not find tracker"
             }
         return future {
-            tracker.authCallback(input.callbackUrl)
-            val trackerType = TrackerType(tracker)
+            tracker.authCallback(userId, input.callbackUrl)
+            val trackerType = TrackerType(tracker, userId)
             LoginTrackerOAuthPayload(
                 input.clientMutationId,
                 trackerType.isLoggedIn,
@@ -57,14 +65,19 @@ class TrackMutation {
         val tracker: TrackerType,
     )
 
-    fun loginTrackerCredentials(input: LoginTrackerCredentialsInput): CompletableFuture<LoginTrackerCredentialsPayload> {
+    @RequireAuth
+    fun loginTrackerCredentials(
+        @GraphQLIgnore
+        userId: Int,
+        input: LoginTrackerCredentialsInput,
+    ): CompletableFuture<LoginTrackerCredentialsPayload> {
         val tracker =
             requireNotNull(TrackerManager.getTracker(input.trackerId)) {
                 "Could not find tracker"
             }
         return future {
-            tracker.login(input.username, input.password)
-            val trackerType = TrackerType(tracker)
+            tracker.loginImpl(userId, input.username, input.password)
+            val trackerType = TrackerType(tracker, userId)
             LoginTrackerCredentialsPayload(
                 input.clientMutationId,
                 trackerType.isLoggedIn,
@@ -84,17 +97,22 @@ class TrackMutation {
         val tracker: TrackerType,
     )
 
-    fun logoutTracker(input: LogoutTrackerInput): CompletableFuture<LogoutTrackerPayload> {
+    @RequireAuth
+    fun logoutTracker(
+        @GraphQLIgnore
+        userId: Int,
+        input: LogoutTrackerInput,
+    ): CompletableFuture<LogoutTrackerPayload> {
         val tracker =
             requireNotNull(TrackerManager.getTracker(input.trackerId)) {
                 "Could not find tracker"
             }
-        require(tracker.isLoggedIn) {
-            "Cannot logout of a tracker that is not logged-in"
-        }
         return future {
-            tracker.logout()
-            val trackerType = TrackerType(tracker)
+            require(tracker.isLoggedIn(userId)) {
+                "Cannot logout of a tracker that is not logged-in"
+            }
+            tracker.logout(userId)
+            val trackerType = TrackerType(tracker, userId)
             LogoutTrackerPayload(
                 input.clientMutationId,
                 trackerType.isLoggedIn,
@@ -108,6 +126,8 @@ class TrackMutation {
         val mangaId: Int,
         val trackerId: Int,
         val remoteId: Long,
+        @GraphQLDescription("This will only work if the tracker of the track record supports private tracking")
+        val private: Boolean? = null,
     )
 
     data class BindTrackPayload(
@@ -115,24 +135,67 @@ class TrackMutation {
         val trackRecord: TrackRecordType,
     )
 
-    fun bindTrack(input: BindTrackInput): CompletableFuture<BindTrackPayload> {
-        val (clientMutationId, mangaId, trackerId, remoteId) = input
+    @RequireAuth
+    fun bindTrack(
+        @GraphQLIgnore
+        userId: Int,
+        input: BindTrackInput,
+    ): CompletableFuture<BindTrackPayload> {
+        val (clientMutationId, mangaId, trackerId, remoteId, private) = input
 
         return future {
             Track.bind(
+                userId,
                 mangaId,
                 trackerId,
                 remoteId,
+                private ?: false,
             )
             val trackRecord =
                 transaction {
                     TrackRecordTable
                         .selectAll()
                         .where {
-                            TrackRecordTable.mangaId eq mangaId and (TrackRecordTable.trackerId eq trackerId)
+                            TrackRecordTable.mangaId eq mangaId and
+                                (TrackRecordTable.trackerId eq trackerId) and
+                                (TrackRecordTable.user eq userId)
                         }.first()
                 }
             BindTrackPayload(
+                clientMutationId,
+                TrackRecordType(trackRecord),
+            )
+        }
+    }
+
+    data class BindTrackRecordInput(
+        val clientMutationId: String? = null,
+        val mangaId: Int,
+        val trackRecordId: Int,
+    )
+
+    data class BindTrackRecordPayload(
+        val clientMutationId: String?,
+        val trackRecord: TrackRecordType,
+    )
+
+    @RequireAuth
+    fun bindTrackRecord(
+        @GraphQLIgnore
+        userId: Int,
+        input: BindTrackRecordInput,
+    ): CompletableFuture<BindTrackRecordPayload?> {
+        val (clientMutationId, mangaId, trackRecordId) = input
+
+        return future {
+            val boundTrackRecordId = Track.bindTrackRecord(userId, mangaId, trackRecordId)
+
+            val trackRecord =
+                transaction {
+                    TrackRecordTable.selectAll().where { TrackRecordTable.id eq boundTrackRecordId }.first()
+                }
+
+            BindTrackRecordPayload(
                 clientMutationId,
                 TrackRecordType(trackRecord),
             )
@@ -149,17 +212,23 @@ class TrackMutation {
         val trackRecord: TrackRecordType,
     )
 
-    fun fetchTrack(input: FetchTrackInput): CompletableFuture<FetchTrackPayload> {
+    @RequireAuth
+    fun fetchTrack(
+        @GraphQLIgnore
+        userId: Int,
+        input: FetchTrackInput,
+    ): CompletableFuture<FetchTrackPayload> {
         val (clientMutationId, recordId) = input
 
         return future {
-            Track.refresh(recordId)
+            Track.refresh(userId, recordId)
             val trackRecord =
                 transaction {
                     TrackRecordTable
                         .selectAll()
                         .where {
-                            TrackRecordTable.id eq recordId
+                            TrackRecordTable.id eq recordId and
+                                (TrackRecordTable.user eq userId)
                         }.first()
                 }
             FetchTrackPayload(
@@ -181,17 +250,23 @@ class TrackMutation {
         val trackRecord: TrackRecordType?,
     )
 
-    fun unbindTrack(input: UnbindTrackInput): CompletableFuture<UnbindTrackPayload> {
+    @RequireAuth
+    fun unbindTrack(
+        @GraphQLIgnore
+        userId: Int,
+        input: UnbindTrackInput,
+    ): CompletableFuture<UnbindTrackPayload> {
         val (clientMutationId, recordId, deleteRemoteTrack) = input
 
         return future {
-            Track.unbind(recordId, deleteRemoteTrack)
+            Track.unbind(userId, recordId, deleteRemoteTrack)
             val trackRecord =
                 transaction {
                     TrackRecordTable
                         .selectAll()
                         .where {
-                            TrackRecordTable.id eq recordId
+                            TrackRecordTable.id eq recordId and
+                                (TrackRecordTable.user eq userId)
                         }.firstOrNull()
                 }
             UnbindTrackPayload(
@@ -211,24 +286,29 @@ class TrackMutation {
         val trackRecords: List<TrackRecordType>,
     )
 
-    fun trackProgress(input: TrackProgressInput): CompletableFuture<DataFetcherResult<TrackProgressPayload?>> {
+    @RequireAuth
+    fun trackProgress(
+        @GraphQLIgnore
+        userId: Int,
+        input: TrackProgressInput,
+    ): CompletableFuture<TrackProgressPayload?> {
         val (clientMutationId, mangaId) = input
 
         return future {
-            asDataFetcherResult {
-                Track.trackChapter(mangaId)
-                val trackRecords =
-                    transaction {
-                        TrackRecordTable
-                            .selectAll()
-                            .where { TrackRecordTable.mangaId eq mangaId }
-                            .toList()
-                    }
-                TrackProgressPayload(
-                    clientMutationId,
-                    trackRecords.map { TrackRecordType(it) },
-                )
-            }
+            Track.trackChapter(userId, mangaId)
+            val trackRecords =
+                transaction {
+                    TrackRecordTable
+                        .selectAll()
+                        .where {
+                            TrackRecordTable.mangaId eq mangaId and
+                                (TrackRecordTable.user eq userId)
+                        }.toList()
+                }
+            TrackProgressPayload(
+                clientMutationId,
+                trackRecords.map { TrackRecordType(it) },
+            )
         }
     }
 
@@ -238,8 +318,12 @@ class TrackMutation {
         val status: Int? = null,
         val lastChapterRead: Double? = null,
         val scoreString: String? = null,
+        @GraphQLDescription("This will only work if the tracker of the track record supports reading dates")
         val startDate: Long? = null,
+        @GraphQLDescription("This will only work if the tracker of the track record supports reading dates")
         val finishDate: Long? = null,
+        @GraphQLDescription("This will only work if the tracker of the track record supports private tracking")
+        val private: Boolean? = null,
         @GraphQLDeprecated("Replaced with \"unbindTrack\" mutation", replaceWith = ReplaceWith("unbindTrack"))
         val unbind: Boolean? = null,
     )
@@ -249,9 +333,15 @@ class TrackMutation {
         val trackRecord: TrackRecordType?,
     )
 
-    fun updateTrack(input: UpdateTrackInput): CompletableFuture<UpdateTrackPayload> =
+    @RequireAuth
+    fun updateTrack(
+        @GraphQLIgnore
+        userId: Int,
+        input: UpdateTrackInput,
+    ): CompletableFuture<UpdateTrackPayload> =
         future {
             Track.update(
+                userId,
                 Track.UpdateInput(
                     input.recordId,
                     input.status,
@@ -260,6 +350,7 @@ class TrackMutation {
                     input.startDate,
                     input.finishDate,
                     input.unbind,
+                    input.private,
                 ),
             )
 
@@ -268,7 +359,8 @@ class TrackMutation {
                     TrackRecordTable
                         .selectAll()
                         .where {
-                            TrackRecordTable.id eq input.recordId
+                            TrackRecordTable.id eq input.recordId and
+                                (TrackRecordTable.user eq userId)
                         }.firstOrNull()
                 }
             UpdateTrackPayload(

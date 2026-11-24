@@ -86,12 +86,12 @@ public class CustomContext extends Context {
 
     @Override
     public AssetManager getAssets() {
-        return null;
+        return Resources.getSystem().getAssets();
     }
 
     @Override
     public Resources getResources() {
-        return null;
+        return Resources.getSystem();
     }
 
     @Override
@@ -106,7 +106,7 @@ public class CustomContext extends Context {
 
     @Override
     public Looper getMainLooper() {
-        return null;
+        return Looper.getMainLooper();
     }
 
     @Override
@@ -177,7 +177,7 @@ public class CustomContext extends Context {
     public SharedPreferences getSharedPreferences(@NotNull File file, int mode) {
         String path = file.getAbsolutePath().replace('\\', '/');
         int firstSlash = path.indexOf("/");
-        return new JavaSharedPreferences(path.substring(firstSlash));
+        return getSharedPreferences(path.substring(firstSlash), mode);
     }
 
     @Override

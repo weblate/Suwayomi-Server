@@ -28,15 +28,26 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.leftJoin
+import org.jetbrains.exposed.v1.jdbc.select
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import suwayomi.tachidesk.global.impl.sync.SyncManager
+import suwayomi.tachidesk.global.model.table.UserAccountTable
+import suwayomi.tachidesk.global.model.table.UserSettingsTable
 import suwayomi.tachidesk.manga.impl.Category
 import suwayomi.tachidesk.manga.impl.CategoryManga
-import suwayomi.tachidesk.manga.impl.Chapter
 import suwayomi.tachidesk.manga.impl.Manga
 import suwayomi.tachidesk.manga.model.dataclass.CategoryDataClass
 import suwayomi.tachidesk.manga.model.dataclass.IncludeOrExclude
 import suwayomi.tachidesk.manga.model.dataclass.MangaDataClass
 import suwayomi.tachidesk.manga.model.table.MangaStatus
+import suwayomi.tachidesk.manga.model.table.MangaUserTable
 import suwayomi.tachidesk.server.serverConfig
+import suwayomi.tachidesk.server.settings.userConfig
+import suwayomi.tachidesk.server.settings.value
 import suwayomi.tachidesk.util.HAScheduler
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
@@ -96,8 +107,7 @@ class Updater : IUpdater {
         serverConfig.subscribeTo(serverConfig.globalUpdateInterval, ::scheduleUpdateTask)
         serverConfig.subscribeTo(
             serverConfig.maxSourcesInParallel,
-            { value ->
-                val newMaxPermits = value.coerceAtLeast(1).coerceAtMost(20)
+            { newMaxPermits ->
                 val permitDifference = maxSourcesInParallel - newMaxPermits
                 maxSourcesInParallel = newMaxPermits
 
@@ -116,10 +126,24 @@ class Updater : IUpdater {
 
     override fun getLastUpdateTimestamp(): Long = preferences.getLong(lastUpdateKey, 0)
 
+    fun saveLastUpdateTimestamp() {
+        preferences.edit().putLong(lastUpdateKey, System.currentTimeMillis()).apply()
+    }
+
+    fun getLastAutomatedUpdateTimestamp(): Long = preferences.getLong(lastAutomatedUpdateKey, 0)
+
+    fun saveLastAutomatedUpdateTimestamp() {
+        preferences.edit().putLong(lastAutomatedUpdateKey, System.currentTimeMillis()).apply()
+    }
+
+    override fun deleteLastAutomatedUpdateTimestamp() {
+        preferences.edit().remove(lastAutomatedUpdateKey).apply()
+    }
+
     private fun autoUpdateTask() {
         try {
-            val lastAutomatedUpdate = preferences.getLong(lastAutomatedUpdateKey, 0)
-            preferences.edit().putLong(lastAutomatedUpdateKey, System.currentTimeMillis()).apply()
+            val lastAutomatedUpdate = getLastAutomatedUpdateTimestamp()
+            saveLastAutomatedUpdateTimestamp()
 
             if (getStatus().isRunning) {
                 logger.debug { "Global update is already in progress" }
@@ -131,7 +155,23 @@ class Updater : IUpdater {
                     lastAutomatedUpdate,
                 )})"
             }
-            addCategoriesToUpdateQueue(Category.getCategoryList(), clear = true, forceAll = false)
+
+            val userIds =
+                transaction {
+                    UserAccountTable.selectAll().map { it[UserAccountTable.id].value }
+                }
+
+            reset()
+
+            userIds.forEach { userId ->
+                addCategoriesToUpdateQueue(
+                    userId,
+                    Category.getCategoryList(userId),
+                    clear = false,
+                    forceAll = false,
+                    automatedUpdate = true,
+                )
+            }
         } catch (e: Exception) {
             logger.error(e) { "autoUpdateTask: failed due to" }
         }
@@ -146,16 +186,24 @@ class Updater : IUpdater {
             return
         }
 
-        val updateInterval =
-            serverConfig.globalUpdateInterval.value.hours
-                .coerceAtLeast(6.hours)
-                .inWholeMilliseconds
-        val lastAutomatedUpdate = preferences.getLong(lastAutomatedUpdateKey, 0)
-        val timeToNextExecution = (updateInterval - (System.currentTimeMillis() - lastAutomatedUpdate)).mod(updateInterval)
+        val updateInterval = serverConfig.globalUpdateInterval.value.hours.inWholeMilliseconds
+        val lastAutomatedUpdate = getLastAutomatedUpdateTimestamp()
+        val isInitialScheduling = lastAutomatedUpdate == 0L
+
+        val timeToNextExecution =
+            if (!isInitialScheduling) {
+                (updateInterval - (System.currentTimeMillis() - lastAutomatedUpdate)).mod(updateInterval)
+            } else {
+                updateInterval
+            }
+
+        if (isInitialScheduling) {
+            saveLastAutomatedUpdateTimestamp()
+        }
 
         val wasPreviousUpdateTriggered =
             System.currentTimeMillis() - (
-                if (lastAutomatedUpdate > 0) lastAutomatedUpdate else System.currentTimeMillis()
+                if (!isInitialScheduling) lastAutomatedUpdate else System.currentTimeMillis()
             ) < updateInterval
         if (!wasPreviousUpdateTriggered) {
             GlobalScope.launch {
@@ -286,13 +334,22 @@ class Updater : IUpdater {
         tracker[job.manga.id] = job.copy(status = JobStatus.RUNNING)
         updateStatus(mangaUpdates = listOf(tracker[job.manga.id]!!))
 
+        // updateMangas is per-user. For automated global updates (job.userId == null), update the manga info if any
+        // user with this manga has it enabled. For user-triggered updates, the triggering user's setting applies.
+        val updateManga =
+            if (job.userId != null) {
+                userConfig.updateMangas.value(job.userId) || !job.manga.initialized
+            } else {
+                anyUserWantsMangaUpdate(job.manga.id) || !job.manga.initialized
+            }
+
         tracker[job.manga.id] =
             try {
                 logger.info { "Updating ${job.manga}" }
-                if (serverConfig.updateMangas.value || !job.manga.initialized) {
-                    Manga.getManga(job.manga.id, true)
-                }
-                Chapter.getChapterList(job.manga.id, true)
+                Manga.updateMangaAndChapters(
+                    job.manga.id,
+                    updateManga = updateManga,
+                )
                 job.copy(status = JobStatus.COMPLETE)
             } catch (e: Exception) {
                 logger.error(e) { "Error while updating ${job.manga}" }
@@ -312,107 +369,130 @@ class Updater : IUpdater {
     }
 
     override fun addCategoriesToUpdateQueue(
+        userId: Int,
         categories: List<CategoryDataClass>,
         clear: Boolean?,
         forceAll: Boolean,
+        automatedUpdate: Boolean,
     ) {
-        preferences.edit().putLong(lastUpdateKey, System.currentTimeMillis()).apply()
-
-        if (clear == true) {
-            reset()
-        }
-
-        val includeInUpdateStatusToCategoryMap = categories.groupBy { it.includeInUpdate }
-        val excludedCategories = includeInUpdateStatusToCategoryMap[IncludeOrExclude.EXCLUDE].orEmpty()
-        val includedCategories = includeInUpdateStatusToCategoryMap[IncludeOrExclude.INCLUDE].orEmpty()
-        val unsetCategories = includeInUpdateStatusToCategoryMap[IncludeOrExclude.UNSET].orEmpty()
-        val categoriesToUpdate =
-            if (forceAll) {
-                categories
-            } else {
-                includedCategories.ifEmpty { unsetCategories }
-            }
-        val skippedCategories = categories.subtract(categoriesToUpdate.toSet()).toList()
-        val updateStatusCategories =
-            mapOf(
-                Pair(CategoryUpdateStatus.UPDATING, categoriesToUpdate),
-                Pair(CategoryUpdateStatus.SKIPPED, skippedCategories),
-            )
-
-        logger.debug { "Updating categories: '${categoriesToUpdate.joinToString("', '") { it.name }}'" }
-
-        val categoriesToUpdateMangas =
-            categoriesToUpdate
-                .flatMap { CategoryManga.getCategoryMangaList(it.id) }
-                .distinctBy { it.id }
-        val mangasToCategoriesMap = CategoryManga.getMangasCategories(categoriesToUpdateMangas.map { it.id })
-        val mangasToUpdate =
-            categoriesToUpdateMangas
-                .asSequence()
-                .filter { it.updateStrategy == UpdateStrategy.ALWAYS_UPDATE }
-                .filter {
-                    if (serverConfig.excludeUnreadChapters.value) {
-                        (it.unreadCount ?: 0L) == 0L
-                    } else {
-                        true
-                    }
-                }.filter {
-                    if (it.initialized && serverConfig.excludeNotStarted.value) {
-                        it.lastReadAt != null
-                    } else {
-                        true
-                    }
-                }.filter {
-                    if (serverConfig.excludeCompleted.value) {
-                        it.status != MangaStatus.COMPLETED.name
-                    } else {
-                        true
-                    }
-                }.filter { forceAll || !excludedCategories.any { category -> mangasToCategoriesMap[it.id]?.contains(category) == true } }
-                .toList()
-        val skippedMangas = categoriesToUpdateMangas.subtract(mangasToUpdate.toSet()).toList()
-
-        this.updateStatusCategories = updateStatusCategories
-        this.updateStatusSkippedMangas = skippedMangas
-
-        if (mangasToUpdate.isEmpty()) {
-            // In case no manga gets updated and no update job was running before, the client would never receive an info
-            // about its update request
-            scope.launch {
-                updateStatus(immediate = true)
-            }
-            return
-        }
-
         scope.launch {
-            updateStatus(
-                categoryUpdates =
-                    updateStatusCategories[CategoryUpdateStatus.UPDATING]
-                        ?.map {
-                            CategoryUpdateJob(it, CategoryUpdateStatus.UPDATING)
-                        }.orEmpty(),
-                mangaUpdates = mangasToUpdate.map { UpdateJob(it) },
-                isRunning = true,
+            SyncManager.ensureSync(userId)
+
+            saveLastUpdateTimestamp()
+
+            if (clear == true) {
+                reset()
+            }
+
+            val includeInUpdateStatusToCategoryMap = categories.groupBy { it.includeInUpdate }
+            val excludedCategories = includeInUpdateStatusToCategoryMap[IncludeOrExclude.EXCLUDE].orEmpty()
+            val includedCategories = includeInUpdateStatusToCategoryMap[IncludeOrExclude.INCLUDE].orEmpty()
+            val unsetCategories = includeInUpdateStatusToCategoryMap[IncludeOrExclude.UNSET].orEmpty()
+            val categoriesToUpdate =
+                if (forceAll) {
+                    categories
+                } else {
+                    includedCategories.ifEmpty { unsetCategories }
+                }
+            val skippedCategories = categories.subtract(categoriesToUpdate.toSet()).toList()
+            val updateStatusCategories =
+                mapOf(
+                    Pair(CategoryUpdateStatus.UPDATING, categoriesToUpdate),
+                    Pair(CategoryUpdateStatus.SKIPPED, skippedCategories),
+                )
+
+            logger.debug { "Updating categories: '${categoriesToUpdate.joinToString("', '") { it.name }}'" }
+
+            val categoriesToUpdateMangas =
+                categoriesToUpdate
+                    .flatMap { CategoryManga.getCategoryMangaList(userId, it.id) }
+                    .distinctBy { it.id }
+            val mangasToCategoriesMap = CategoryManga.getMangasCategories(userId, categoriesToUpdateMangas.map { it.id })
+            val mangasToUpdate =
+                categoriesToUpdateMangas
+                    .asSequence()
+                    .filter { it.updateStrategy == UpdateStrategy.ALWAYS_UPDATE }
+                    .filter {
+                        if (userConfig.excludeUnreadChapters.value(userId)) {
+                            (it.unreadCount ?: 0L) == 0L
+                        } else {
+                            true
+                        }
+                    }.filter {
+                        if (it.initialized && userConfig.excludeNotStarted.value(userId)) {
+                            // Marking chapters read does not necessarily set a reading timestamp.
+                            (it.lastReadAt ?: 0L) > 0L || (it.chapterCount ?: 0L) > (it.unreadCount ?: 0L)
+                        } else {
+                            true
+                        }
+                    }.filter {
+                        if (userConfig.excludeCompleted.value(userId)) {
+                            it.status != MangaStatus.COMPLETED.name
+                        } else {
+                            true
+                        }
+                    }.filter {
+                        forceAll ||
+                            !excludedCategories.any { category ->
+                                mangasToCategoriesMap[it.id]?.contains(category) == true
+                            }
+                    }.toList()
+            val skippedMangas = categoriesToUpdateMangas.subtract(mangasToUpdate.toSet()).toList()
+
+            if (clear == true) {
+                this@Updater.updateStatusCategories = updateStatusCategories
+                this@Updater.updateStatusSkippedMangas = skippedMangas
+            } else {
+                this@Updater.updateStatusCategories = mergeCategoryStatusMaps(this@Updater.updateStatusCategories, updateStatusCategories)
+                this@Updater.updateStatusSkippedMangas = (this@Updater.updateStatusSkippedMangas + skippedMangas).distinctBy { it.id }
+            }
+
+            if (mangasToUpdate.isEmpty()) {
+                // In case no manga gets updated and no update job was running before, the client would never receive an info
+                // about its update request
+                scope.launch {
+                    updateStatus(immediate = true)
+                }
+                return@launch
+            }
+
+            scope.launch {
+                updateStatus(
+                    categoryUpdates =
+                        updateStatusCategories[CategoryUpdateStatus.UPDATING]
+                            ?.map {
+                                CategoryUpdateJob(it, CategoryUpdateStatus.UPDATING)
+                            }.orEmpty(),
+                    mangaUpdates = mangasToUpdate.map { UpdateJob(it, userId = if (automatedUpdate) null else userId) },
+                    isRunning = true,
+                )
+            }
+
+            addMangasToQueue(
+                mangasToUpdate
+                    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, MangaDataClass::title)),
+                if (automatedUpdate) null else userId,
             )
         }
-
-        addMangasToQueue(
-            mangasToUpdate
-                .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, MangaDataClass::title)),
-        )
     }
 
-    override fun addMangasToQueue(mangas: List<MangaDataClass>) {
+    override fun addMangasToQueue(
+        mangas: List<MangaDataClass>,
+        userId: Int?,
+    ) {
         // create all manga update jobs before adding them to the queue so that the client is able to calculate the
         // progress properly right form the start
-        mangas.forEach { tracker[it.id] = UpdateJob(it) }
-        mangas.forEach { addMangaToQueue(it) }
+        mangas.forEach { tracker[it.id] = UpdateJob(it, userId = userId) }
+        mangas.forEach { addMangaToQueue(it, userId) }
     }
 
-    private fun addMangaToQueue(manga: MangaDataClass) {
+    private fun addMangaToQueue(
+        manga: MangaDataClass,
+        userId: Int?,
+    ) {
         val updateChannel = getOrCreateUpdateChannelFor(manga.sourceId)
         scope.launch {
-            updateChannel.send(UpdateJob(manga))
+            updateChannel.send(UpdateJob(manga, userId = userId))
         }
     }
 
@@ -431,5 +511,35 @@ class Updater : IUpdater {
 
         updateChannels.forEach { (_, channel) -> channel.cancel() }
         updateChannels.clear()
+    }
+
+    /**
+     * Returns true if any user who has [mangaId] in their library has the per-user `updateMangas` setting enabled
+     */
+    private fun anyUserWantsMangaUpdate(mangaId: Int): Boolean =
+        transaction {
+            MangaUserTable
+                .leftJoin(
+                    UserSettingsTable,
+                    { MangaUserTable.user },
+                    { UserSettingsTable.user },
+                    { UserSettingsTable.key eq "updateMangas" },
+                ).select(MangaUserTable.id)
+                .where {
+                    (MangaUserTable.manga eq mangaId) and
+                        (MangaUserTable.inLibrary eq true) and
+                        (UserSettingsTable.value eq "true")
+                }.count() > 0
+        }
+
+    private fun mergeCategoryStatusMaps(
+        existing: Map<CategoryUpdateStatus, List<CategoryDataClass>>,
+        new: Map<CategoryUpdateStatus, List<CategoryDataClass>>,
+    ): Map<CategoryUpdateStatus, List<CategoryDataClass>> {
+        val merged = existing.toMutableMap()
+        new.forEach { (status, categories) ->
+            merged[status] = (merged[status].orEmpty() + categories).distinctBy { it.id }
+        }
+        return merged
     }
 }

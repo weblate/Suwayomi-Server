@@ -11,19 +11,20 @@ import com.expediagroup.graphql.dataloader.KotlinDataLoader
 import graphql.GraphQLContext
 import org.dataloader.DataLoader
 import org.dataloader.DataLoaderFactory
-import org.jetbrains.exposed.sql.Slf4jSqlDebugLogger
-import org.jetbrains.exposed.sql.addLogger
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.Slf4jSqlDebugLogger
+import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import suwayomi.tachidesk.graphql.server.primitives.inIds
 import suwayomi.tachidesk.graphql.types.ExtensionType
 import suwayomi.tachidesk.manga.model.table.ExtensionTable
 import suwayomi.tachidesk.manga.model.table.SourceTable
 import suwayomi.tachidesk.server.JavalinSetup.future
 
-class ExtensionDataLoader : KotlinDataLoader<String, ExtensionType?> {
+class ExtensionDataLoader : KotlinDataLoader<String, ExtensionType> {
     override val dataLoaderName = "ExtensionDataLoader"
 
-    override fun getDataLoader(graphQLContext: GraphQLContext): DataLoader<String, ExtensionType?> =
+    override fun getDataLoader(graphQLContext: GraphQLContext): DataLoader<String, ExtensionType> =
         DataLoaderFactory.newDataLoader { ids ->
             future {
                 transaction {
@@ -40,10 +41,10 @@ class ExtensionDataLoader : KotlinDataLoader<String, ExtensionType?> {
         }
 }
 
-class ExtensionForSourceDataLoader : KotlinDataLoader<Long, ExtensionType?> {
+class ExtensionForSourceDataLoader : KotlinDataLoader<Long, ExtensionType> {
     override val dataLoaderName = "ExtensionForSourceDataLoader"
 
-    override fun getDataLoader(graphQLContext: GraphQLContext): DataLoader<Long, ExtensionType?> =
+    override fun getDataLoader(graphQLContext: GraphQLContext): DataLoader<Long, ExtensionType> =
         DataLoaderFactory.newDataLoader { ids ->
             future {
                 transaction {
@@ -52,7 +53,7 @@ class ExtensionForSourceDataLoader : KotlinDataLoader<Long, ExtensionType?> {
                         ExtensionTable
                             .innerJoin(SourceTable)
                             .selectAll()
-                            .where { SourceTable.id inList ids }
+                            .where { SourceTable.id inIds ids }
                             .toList()
                             .map { Triple(it[SourceTable.id].value, it[ExtensionTable.pkgName], it) }
                             .let { triples ->

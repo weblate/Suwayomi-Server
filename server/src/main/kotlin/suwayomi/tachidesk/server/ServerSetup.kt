@@ -7,37 +7,67 @@ package suwayomi.tachidesk.server
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import android.os.Looper
 import ch.qos.logback.classic.Level
 import com.typesafe.config.ConfigRenderOptions
+import dorkbox.updates.Updates
 import eu.kanade.tachiyomi.App
 import eu.kanade.tachiyomi.createAppModule
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.source.local.LocalSource
 import io.github.oshai.kotlinlogging.KotlinLogging
-import io.javalin.json.JavalinJackson
+import io.javalin.json.JavalinJackson3
 import io.javalin.json.JsonMapper
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.cef.network.CefCookieManager
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.lowerCase
+import org.jetbrains.exposed.v1.core.neq
+import org.jetbrains.exposed.v1.jdbc.select
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.update
 import org.koin.core.context.startKoin
 import org.koin.core.module.Module
 import org.koin.dsl.module
+import suwayomi.tachidesk.global.impl.KcefWebView.Companion.toCefCookie
+import suwayomi.tachidesk.global.impl.sync.SyncManager
+import suwayomi.tachidesk.global.impl.util.Bcrypt
+import suwayomi.tachidesk.global.model.table.UserAccountTable
+import suwayomi.tachidesk.graphql.types.AuthMode
+import suwayomi.tachidesk.graphql.types.DatabaseType
 import suwayomi.tachidesk.i18n.LocalizationHelper
 import suwayomi.tachidesk.manga.impl.backup.proto.ProtoBackupExport
 import suwayomi.tachidesk.manga.impl.download.DownloadManager
+import suwayomi.tachidesk.manga.impl.extension.Extension
+import suwayomi.tachidesk.manga.impl.extension.ExtensionStoreService
 import suwayomi.tachidesk.manga.impl.update.IUpdater
 import suwayomi.tachidesk.manga.impl.update.Updater
 import suwayomi.tachidesk.manga.impl.util.lang.renameTo
 import suwayomi.tachidesk.server.database.databaseUp
 import suwayomi.tachidesk.server.generated.BuildConfig
+import suwayomi.tachidesk.server.settings.SettingsRegistry
 import suwayomi.tachidesk.server.util.AppMutex.handleAppMutex
+import suwayomi.tachidesk.server.util.CEFManager
+import suwayomi.tachidesk.server.util.ConfigTypeRegistration
+import suwayomi.tachidesk.server.util.ExitCode
 import suwayomi.tachidesk.server.util.SystemTray
+import suwayomi.tachidesk.server.util.shutdownApp
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import xyz.nulldev.androidcompat.AndroidCompat
 import xyz.nulldev.androidcompat.AndroidCompatInitializer
 import xyz.nulldev.androidcompat.androidCompatModule
+import xyz.nulldev.androidcompat.webkit.KcefWebViewProvider
 import xyz.nulldev.ts.config.ApplicationRootDir
 import xyz.nulldev.ts.config.BASE_LOGGER_NAME
 import xyz.nulldev.ts.config.GlobalConfigManager
@@ -50,6 +80,7 @@ import java.net.Authenticator
 import java.net.PasswordAuthentication
 import java.security.Security
 import java.util.Locale
+import kotlin.random.Random
 
 private val logger = KotlinLogging.logger {}
 
@@ -58,16 +89,33 @@ class ApplicationDirs(
     val tempRoot: String = "${System.getProperty("java.io.tmpdir")}/Tachidesk",
 ) {
     val extensionsRoot = "$dataRoot/extensions"
-    val downloadsRoot get() = serverConfig.downloadsPath.value.ifBlank { "$dataRoot/downloads" }
-    val localMangaRoot get() = serverConfig.localSourcePath.value.ifBlank { "$dataRoot/local" }
+    val downloadsRoot
+        get() = serverConfig.downloadsPath.value.ifBlank { "$dataRoot/downloads" }
+    val localMangaRoot
+        get() = serverConfig.localSourcePath.value.ifBlank { "$dataRoot/local" }
     val webUIRoot = "$dataRoot/webUI"
-    val automatedBackupRoot get() = serverConfig.backupPath.value.ifBlank { "$dataRoot/backups" }
+    val webUIServe = "$tempRoot/webUI-serve"
+    val automatedBackupRoot
+        get() = serverConfig.backupPath.value.ifBlank { "$dataRoot/backups" }
 
     val tempThumbnailCacheRoot = "$tempRoot/thumbnails"
     val tempMangaCacheRoot = "$tempRoot/manga-cache"
 
-    val thumbnailDownloadsRoot get() = "$downloadsRoot/thumbnails"
-    val mangaDownloadsRoot get() = "$downloadsRoot/mangas"
+    val thumbnailDownloadsRoot
+        get() = "$downloadsRoot/thumbnails"
+    val mangaDownloadsRoot
+        get() = "$downloadsRoot/mangas"
+
+    val cacheDir = "$dataRoot/cache"
+}
+
+@Suppress("DEPRECATION")
+class LooperThread : Thread() {
+    override fun run() {
+        logger.info { "Starting Android Main Loop" }
+        Looper.prepareMainLooper()
+        Looper.loop()
+    }
 }
 
 data class ProxySettings(
@@ -79,7 +127,20 @@ data class ProxySettings(
     val proxyPassword: String,
 )
 
-val serverConfig: ServerConfig by lazy { GlobalConfigManager.module() }
+data class DatabaseSettings(
+    val databaseType: DatabaseType,
+    val databaseUrl: String,
+    val databaseUsername: String,
+    val databasePassword: String,
+    val databaseSchema: String,
+    val useHikariConnectionPool: Boolean,
+    val hikariMaxPoolSize: Int,
+)
+
+data class AuthSettings(
+    val authUsername: String,
+    val authPassword: String,
+)
 
 val androidCompat by lazy { AndroidCompat() }
 
@@ -87,25 +148,37 @@ fun setupLogLevelUpdating(
     configFlow: MutableStateFlow<Boolean>,
     loggerNames: List<String>,
     defaultLevel: Level = Level.INFO,
+    debugLevel: Level = Level.DEBUG,
 ) {
-    serverConfig.subscribeTo(configFlow, { debugLogsEnabled ->
-        loggerNames.forEach { loggerName -> setLogLevelFor(loggerName, if (debugLogsEnabled) Level.DEBUG else defaultLevel) }
-    }, ignoreInitialValue = false)
+    serverConfig.subscribeTo(
+        configFlow,
+        { debugLogsEnabled ->
+            loggerNames.forEach { loggerName ->
+                setLogLevelFor(loggerName, if (debugLogsEnabled) debugLevel else defaultLevel)
+            }
+        },
+        ignoreInitialValue = false,
+    )
 }
 
 fun serverModule(applicationDirs: ApplicationDirs): Module =
     module {
         single { applicationDirs }
         single<IUpdater> { Updater() }
-        single<JsonMapper> { JavalinJackson() }
+        single<JsonMapper> { JavalinJackson3() }
     }
 
+@OptIn(DelicateCoroutinesApi::class)
 fun applicationSetup() {
     Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
-        KotlinLogging.logger { }.error(throwable) { "unhandled exception" }
+        KotlinLogging.logger {}.error(throwable) { "unhandled exception" }
     }
 
+    val mainLoop = LooperThread()
+    mainLoop.start()
+
     // register Tachidesk's config which is dubbed "ServerConfig"
+    ConfigTypeRegistration.registerCustomTypes()
     GlobalConfigManager.registerModule(
         ServerConfig.register { GlobalConfigManager.config },
     )
@@ -137,15 +210,23 @@ fun applicationSetup() {
     )
 
     setupLogLevelUpdating(serverConfig.debugLogsEnabled, listOf(BASE_LOGGER_NAME))
+    setupLogLevelUpdating(serverConfig.debugLogsEnabled, listOf("Exposed"), defaultLevel = Level.OFF, debugLevel = Level.WARN)
+    setLogLevelFor("org.eclipse.jetty", Level.OFF)
+    setLogLevelFor("com.zaxxer.hikari", Level.WARN)
 
     logger.info { "Running Suwayomi-Server ${BuildConfig.VERSION}" }
 
     logger.debug {
         "Loaded config:\n" +
-            GlobalConfigManager.config
-                .root()
+            GlobalConfigManager
+                .getRedactedConfig(
+                    SettingsRegistry
+                        .getAll()
+                        .filter { !it.value.privacySafe }
+                        .keys
+                        .toList(),
+                ).root()
                 .render(ConfigRenderOptions.concise().setFormatted(true))
-                .replace(Regex("(\"basicAuth(?:Username|Password)\"\\s:\\s)(?!\"\")\".*\""), "$1\"******\"")
     }
 
     logger.debug { "Data Root directory is set to: ${applicationDirs.dataRoot}" }
@@ -163,9 +244,7 @@ fun applicationSetup() {
         applicationDirs.tempThumbnailCacheRoot,
         applicationDirs.downloadsRoot,
         applicationDirs.localMangaRoot,
-    ).forEach {
-        File(it).mkdirs()
-    }
+    ).forEach { File(it).mkdirs() }
 
     // initialize Koin modules
     val app = App()
@@ -175,6 +254,33 @@ fun applicationSetup() {
             androidCompatModule(),
             configManagerModule(),
             serverModule(applicationDirs),
+            module {
+                single<KcefWebViewProvider.InitBrowserHandler> {
+                    object : KcefWebViewProvider.InitBrowserHandler {
+                        override fun init(provider: KcefWebViewProvider) {
+                            val networkHelper = Injekt.get<NetworkHelper>()
+                            val logger = KotlinLogging.logger {}
+                            logger.info { "Start loading cookies" }
+                            CefCookieManager.getGlobalManager().apply {
+                                val cookies = networkHelper.cookieStore.getStoredCookies()
+                                for (cookie in cookies) {
+                                    try {
+                                        if (!setCookie(
+                                                "https://" + cookie.domain,
+                                                cookie.toCefCookie(),
+                                            )
+                                        ) {
+                                            throw Exception()
+                                        }
+                                    } catch (e: Exception) {
+                                        logger.warn(e) { "Loading cookie ${cookie.name} failed" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
         )
     }
 
@@ -186,24 +292,39 @@ fun applicationSetup() {
     // start app
     androidCompat.startApp(app)
 
+    // Delete files before any extension-related logic can be executed that causes the jars to get loaded
+    Extension.cleanupExtensionFiles()
+
     // Initialize NetworkHelper early
-    Injekt.get<NetworkHelper>()
+    Injekt
+        .get<NetworkHelper>()
+        .userAgentFlow
+        .onEach { System.setProperty("http.agent", it) }
+        .launchIn(GlobalScope)
 
     // create or update conf file if doesn't exist
     try {
         val dataConfFile = File("${applicationDirs.dataRoot}/server.conf")
         if (!dataConfFile.exists()) {
             JavalinSetup::class.java.getResourceAsStream("/server-reference.conf").use { input ->
-                dataConfFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+                dataConfFile.outputStream().use { output -> input.copyTo(output) }
             }
         } else {
             // make sure the user config file is up-to-date
-            GlobalConfigManager.updateUserConfig()
+            GlobalConfigManager.updateUserConfig {
+                try {
+                    migrateConfig(this, it)
+                } catch (e: Throwable) {
+                    logger.error(e) { "Failed to migrate config" }
+                    shutdownApp(ExitCode.ConfigMigrationFailure)
+                }
+
+                this
+            }
         }
     } catch (e: Exception) {
         logger.error(e) { "Exception while creating initial server.conf" }
+        shutdownApp(ExitCode.SetupConfFileFailed)
     }
 
     // copy local source icon
@@ -211,44 +332,87 @@ fun applicationSetup() {
         val localSourceIconFile = File("${applicationDirs.extensionsRoot}/icon/localSource.png")
         if (!localSourceIconFile.exists()) {
             JavalinSetup::class.java.getResourceAsStream("/icon/localSource.png").use { input ->
-                localSourceIconFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+                localSourceIconFile.outputStream().use { output -> input.copyTo(output) }
             }
         }
     } catch (e: Exception) {
         logger.error(e) { "Exception while copying Local source's icon" }
+        shutdownApp(ExitCode.LocalSourceIconCopyFailure)
     }
 
-    // fixes #119 , ref: https://github.com/Suwayomi/Suwayomi-Server/issues/119#issuecomment-894681292 , source Id calculation depends on String.lowercase()
+    // fixes #119 , ref:
+    // https://github.com/Suwayomi/Suwayomi-Server/issues/119#issuecomment-894681292 , source Id
+    // calculation depends on String.lowercase()
     Locale.setDefault(Locale.ENGLISH)
 
     // Initialize the localization service
     LocalizationHelper.initialize()
-    logger.debug { "Localization service initialized. Supported languages: ${LocalizationHelper.getSupportedLocales()}" }
+    logger.debug {
+        "Localization service initialized. Supported languages: ${LocalizationHelper.getSupportedLocales()}"
+    }
 
-    databaseUp()
+    runBlocking {
+        runMigrations(applicationDirs) {
+            databaseUp()
+        }
+    }
 
-    LocalSource.register()
+    try {
+        LocalSource.register()
+    } catch (e: Exception) {
+        logger.error(e) { "Failed to setup LocalSource" }
+        shutdownApp(ExitCode.LocalSourceSetupFailure)
+    }
+
+    serverConfig.subscribeTo(
+        combine<Any, DatabaseSettings>(
+            serverConfig.databaseType,
+            serverConfig.databaseUrl,
+            serverConfig.databaseUsername,
+            serverConfig.databasePassword,
+            serverConfig.databaseSchema,
+            serverConfig.useHikariConnectionPool,
+            serverConfig.hikariMaxPoolSize,
+        ) { vargs ->
+            DatabaseSettings(
+                databaseType = vargs[0] as DatabaseType,
+                databaseUrl = vargs[1] as String,
+                databaseUsername = vargs[2] as String,
+                databasePassword = vargs[3] as String,
+                databaseSchema = vargs[4] as String,
+                useHikariConnectionPool = vargs[5] as Boolean,
+                hikariMaxPoolSize = vargs[6] as Int,
+            )
+        }.distinctUntilChanged(),
+        { (databaseType, databaseUrl, _databaseUsername, _databasePassword, databaseSchema, hikariCp, hikariMaxPoolSize) ->
+            logger.info {
+                "Database changed - type=$databaseType url=$databaseUrl, username=[REDACTED], password=[REDACTED], schema=$databaseSchema, hikaricp=$hikariCp, hikariMaxPoolSize=$hikariMaxPoolSize"
+            }
+            databaseUp()
+
+            LocalSource.register()
+        },
+        ignoreInitialValue = true,
+    )
 
     // create system tray
-    serverConfig.subscribeTo(serverConfig.systemTrayEnabled, { systemTrayEnabled ->
-        try {
-            if (systemTrayEnabled) {
-                SystemTray.create()
-            } else {
-                SystemTray.remove()
+    Updates.ENABLE = false
+    serverConfig.subscribeTo(
+        serverConfig.systemTrayEnabled,
+        { systemTrayEnabled ->
+            try {
+                if (systemTrayEnabled) {
+                    SystemTray.create()
+                } else {
+                    SystemTray.remove()
+                }
+            } catch (e: Throwable) {
+                // cover both java.lang.Exception and java.lang.Error
+                logger.error(e) { "Failed to create/remove SystemTray due to" }
             }
-        } catch (e: Throwable) {
-            // cover both java.lang.Exception and java.lang.Error
-            logger.error(e) { "Failed to create/remove SystemTray due to" }
-        }
-    }, ignoreInitialValue = false)
-
-    runMigrations(applicationDirs)
-
-    // Disable jetty's logging
-    setLogLevelFor("org.eclipse.jetty", Level.OFF)
+        },
+        ignoreInitialValue = false,
+    )
 
     // socks proxy settings
     serverConfig.subscribeTo(
@@ -271,7 +435,7 @@ fun applicationSetup() {
         }.distinctUntilChanged(),
         { (proxyEnabled, proxyVersion, proxyHost, proxyPort, proxyUsername, proxyPassword) ->
             logger.info {
-                "Socks Proxy changed - enabled=$proxyEnabled address=$proxyHost:$proxyPort , username=$proxyUsername, password=[REDACTED]"
+                "Socks Proxy changed - enabled=$proxyEnabled address=$proxyHost:$proxyPort , username=[REDACTED], password=[REDACTED]"
             }
             if (proxyEnabled) {
                 System.setProperty("socksProxyHost", proxyHost)
@@ -282,7 +446,10 @@ fun applicationSetup() {
                     object : Authenticator() {
                         override fun getPasswordAuthentication(): PasswordAuthentication? {
                             if (requestingProtocol.startsWith("SOCKS", ignoreCase = true)) {
-                                return PasswordAuthentication(proxyUsername, proxyPassword.toCharArray())
+                                return PasswordAuthentication(
+                                    proxyUsername,
+                                    proxyPassword.toCharArray(),
+                                )
                             }
 
                             return null
@@ -312,4 +479,69 @@ fun applicationSetup() {
 
     // start DownloadManager and restore + resume downloads
     DownloadManager.restoreAndResumeDownloads()
+
+    SyncManager.scheduleSyncTask()
+
+    // asynchronously initialize CEF
+    GlobalScope.launch {
+        CEFManager.init()
+    }
+
+    serverConfig.subscribeTo(
+        serverConfig.extensionStores,
+        { _ ->
+            ExtensionStoreService.syncPrefsToDb()
+        },
+        ignoreInitialValue = false,
+    )
+
+    serverConfig.subscribeTo(
+        combine<Any, AuthSettings>(
+            serverConfig.authUsername,
+            serverConfig.authPassword,
+        ) { vargs ->
+            AuthSettings(
+                authUsername = vargs[0] as String,
+                authPassword = vargs[1] as String,
+            )
+        },
+        onChange = { settings ->
+            try {
+                transaction {
+                    val usernameSetting = settings.authUsername.trim().ifEmpty { "admin" }
+
+                    val username =
+                        if (
+                            UserAccountTable
+                                .select(UserAccountTable.id)
+                                .where {
+                                    (UserAccountTable.username.lowerCase() eq usernameSetting.lowercase()) and
+                                        (UserAccountTable.id neq 1)
+                                }.empty()
+                        ) {
+                            usernameSetting
+                        } else {
+                            val username = usernameSetting + Random.nextInt(9999)
+                            logger.warn { "Username taken, username now `$username`" }
+                            username
+                        }
+
+                    UserAccountTable.update({ UserAccountTable.id eq 1 }) {
+                        it[UserAccountTable.username] = username
+                        it[UserAccountTable.password] =
+                            Bcrypt.encryptPassword(
+                                settings.authPassword.trim().ifEmpty { "password" },
+                            )
+                    }
+                }
+            } catch (e: Exception) {
+                logger.error(e) { "Unable to update admin username" }
+            }
+        },
+        ignoreInitialValue = false,
+    )
+
+    if (serverConfig.authMode.value == AuthMode.BASIC_AUTH) {
+        logger.warn { "`server.authMode = BASIC_AUTH` is deprecated, please switch to a different authMode!" }
+    }
 }

@@ -2,20 +2,23 @@ package suwayomi.tachidesk.manga.impl.track.tracker.myanimelist
 
 import android.annotation.StringRes
 import io.github.oshai.kotlinlogging.KotlinLogging
-import kotlinx.serialization.encodeToString
+import io.github.reactivecircus.cache4k.Cache
 import kotlinx.serialization.json.Json
-import suwayomi.tachidesk.manga.impl.track.tracker.DeletableTrackService
+import suwayomi.tachidesk.manga.impl.track.tracker.DeletableTracker
 import suwayomi.tachidesk.manga.impl.track.tracker.Tracker
 import suwayomi.tachidesk.manga.impl.track.tracker.extractToken
 import suwayomi.tachidesk.manga.impl.track.tracker.model.Track
 import suwayomi.tachidesk.manga.impl.track.tracker.model.TrackSearch
+import suwayomi.tachidesk.manga.impl.track.tracker.myanimelist.dto.MALOAuth
 import uy.kohesive.injekt.injectLazy
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Duration.Companion.hours
 
 class MyAnimeList(
     id: Int,
 ) : Tracker(id, "MyAnimeList"),
-    DeletableTrackService {
+    DeletableTracker {
     companion object {
         const val READING = 1
         const val COMPLETED = 2
@@ -28,12 +31,24 @@ class MyAnimeList(
         private const val SEARCH_LIST_PREFIX = "my:"
     }
 
-    override val supportsTrackDeletion: Boolean = true
-
     private val json: Json by injectLazy()
 
-    private val interceptor by lazy { MyAnimeListInterceptor(this) }
-    private val api by lazy { MyAnimeListApi(client, interceptor) }
+    private val interceptors = ConcurrentHashMap<Int, MyAnimeListInterceptor>()
+    private val apis =
+        Cache
+            .Builder<Int, MyAnimeListApi>()
+            .expireAfterAccess(1.hours)
+            .build()
+
+    fun interceptor(userId: Int): MyAnimeListInterceptor =
+        interceptors.getOrPut(userId) {
+            MyAnimeListInterceptor(userId, this)
+        }
+
+    suspend fun api(userId: Int): MyAnimeListApi =
+        apis.get(userId) {
+            MyAnimeListApi(client, interceptor(userId))
+        }
 
     override val supportsReadingDates: Boolean = true
 
@@ -61,13 +76,20 @@ class MyAnimeList(
 
     override fun getCompletionStatus(): Int = COMPLETED
 
-    override fun getScoreList(): List<String> = IntRange(0, 10).map(Int::toString)
+    override fun getScoreList(userId: Int): List<String> = IntRange(0, 10).map(Int::toString)
 
-    override fun displayScore(track: Track): String = track.score.toInt().toString()
+    override fun displayScore(
+        userId: Int,
+        track: Track,
+    ): String = track.score.toInt().toString()
 
-    private suspend fun add(track: Track): Track = api.updateItem(track)
+    private suspend fun add(
+        userId: Int,
+        track: Track,
+    ): Track = api(userId).updateItem(track)
 
     override suspend fun update(
+        userId: Int,
         track: Track,
         didReadChapter: Boolean,
     ): Track {
@@ -78,100 +100,115 @@ class MyAnimeList(
                     track.finished_reading_date = System.currentTimeMillis()
                 } else if (track.status != REREADING) {
                     track.status = READING
-                    if (track.last_chapter_read == 1F) {
+                    if (track.last_chapter_read == 1.0) {
                         track.started_reading_date = System.currentTimeMillis()
                     }
                 }
             }
         }
 
-        return api.updateItem(track)
+        return api(userId).updateItem(track)
     }
 
-    override suspend fun delete(track: Track) {
-        api.deleteItem(track)
+    override suspend fun delete(
+        userId: Int,
+        track: Track,
+    ) {
+        api(userId).deleteItem(track)
     }
 
     override suspend fun bind(
+        userId: Int,
         track: Track,
         hasReadChapters: Boolean,
     ): Track {
-        val remoteTrack = api.findListItem(track)
+        val remoteTrack = api(userId).findListItem(track)
         return if (remoteTrack != null) {
             track.copyPersonalFrom(remoteTrack)
-            track.media_id = remoteTrack.media_id
+            track.remote_id = remoteTrack.remote_id
 
             if (track.status != COMPLETED) {
                 val isRereading = track.status == REREADING
-                track.status = if (isRereading.not() && hasReadChapters) READING else track.status
+                track.status = if (!isRereading && hasReadChapters) READING else track.status
             }
 
-            update(track)
+            update(userId, track)
         } else {
             // Set default fields if it's not found in the list
             track.status = if (hasReadChapters) READING else PLAN_TO_READ
-            track.score = 0F
-            add(track)
+            track.score = 0.0
+            add(userId, track)
         }
     }
 
-    override suspend fun search(query: String): List<TrackSearch> {
+    override suspend fun search(
+        userId: Int,
+        query: String,
+    ): List<TrackSearch> {
         if (query.startsWith(SEARCH_ID_PREFIX)) {
             query.substringAfter(SEARCH_ID_PREFIX).toIntOrNull()?.let { id ->
-                return listOf(api.getMangaDetails(id))
+                return listOf(api(userId).getMangaDetails(id))
             }
         }
 
         if (query.startsWith(SEARCH_LIST_PREFIX)) {
             query.substringAfter(SEARCH_LIST_PREFIX).let { title ->
-                return api.findListItems(title)
+                return api(userId).findListItems(title)
             }
         }
 
-        return api.search(query)
+        return api(userId).search(query)
     }
 
-    override suspend fun refresh(track: Track): Track = api.findListItem(track) ?: add(track)
+    override suspend fun refresh(
+        userId: Int,
+        track: Track,
+    ): Track =
+        api(userId).findListItem(track)
+            ?: add(userId, track)
 
     override fun authUrl(): String = MyAnimeListApi.authUrl().toString()
 
-    override suspend fun authCallback(url: String) {
+    override suspend fun authCallback(
+        userId: Int,
+        url: String,
+    ) {
         val code = url.extractToken("code") ?: throw IOException("cannot find token")
-        login(code)
+        login(userId, code)
     }
 
-    override suspend fun login(
+    override suspend fun loginImpl(
+        userId: Int,
         username: String,
         password: String,
-    ) = login(password)
+    ) = login(userId, password)
 
-    suspend fun login(authCode: String) {
+    suspend fun login(
+        userId: Int,
+        authCode: String,
+    ) {
+        val oauth = api(userId).getAccessToken(authCode)
+        interceptor(userId).setAuth(oauth)
+        val username = api(userId).getCurrentUser()
+        saveCredentials(userId, username, oauth.accessToken)
+    }
+
+    override suspend fun logout(userId: Int) {
+        super.logout(userId)
+        trackPreferences.setTrackToken(userId, this, null)
+        interceptor(userId).setAuth(null)
+    }
+
+    fun saveOAuth(
+        userId: Int,
+        oAuth: MALOAuth?,
+    ) {
+        trackPreferences.setTrackToken(userId, this, json.encodeToString(oAuth))
+    }
+
+    fun loadOAuth(userId: Int): MALOAuth? =
         try {
-            logger.debug { "login $authCode" }
-            val oauth = api.getAccessToken(authCode)
-            interceptor.setAuth(oauth)
-            val username = api.getCurrentUser()
-            saveCredentials(username, oauth.access_token)
-        } catch (e: Throwable) {
-            logger.error(e) { "oauth err" }
-            logout()
-            throw e
-        }
-    }
-
-    override fun logout() {
-        super.logout()
-        trackPreferences.setTrackToken(this, null)
-        interceptor.setAuth(null)
-    }
-
-    fun saveOAuth(oAuth: OAuth?) {
-        trackPreferences.setTrackToken(this, json.encodeToString(oAuth))
-    }
-
-    fun loadOAuth(): OAuth? =
-        try {
-            json.decodeFromString<OAuth>(trackPreferences.getTrackToken(this)!!)
+            json.decodeFromString<MALOAuth>(trackPreferences.getTrackToken(userId, this)!!)
         } catch (e: Exception) {
             logger.error(e) { "loadOAuth err" }
             null
